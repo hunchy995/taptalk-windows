@@ -24,6 +24,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Build whisper.dll (AVX-512)
         working-directory: native
         run: |
