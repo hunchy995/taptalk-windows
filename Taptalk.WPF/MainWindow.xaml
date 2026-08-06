@@ -1,0 +1,50 @@
+<Window x:Class="Taptalk.WPF.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Taptalk Settings"
+        Width="420" Height="520"
+        WindowStartupLocation="CenterScreen">
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Taptalk — Voice to Text" FontSize="20" FontWeight="Bold" Margin="0,0,0,12"/>
+
+        <StackPanel Grid.Row="1" Margin="0,0,0,8">
+            <TextBlock Text="Engine:" FontWeight="SemiBold"/>
+            <ComboBox x:Name="EngineCombo" SelectedIndex="0" Margin="0,4,0,0" SelectionChanged="EngineCombo_SelectionChanged">
+                <ComboBoxItem Content="Parakeet (GPU — DirectML)"/>
+                <ComboBoxItem Content="Whisper (CPU — whisper.cpp)"/>
+            </ComboBox>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Margin="0,8,0,8">
+            <TextBlock Text="Model:" FontWeight="SemiBold"/>
+            <DockPanel Margin="0,4,0,0">
+                <Button x:Name="ModelBrowseBtn" Content="Browse..." DockPanel.Dock="Right" Padding="10,4" Click="ModelBrowseBtn_Click"/>
+                <TextBox x:Name="ModelPathBox" IsReadOnly="True" Text="No model loaded — click Browse"/>
+            </DockPanel>
+            <TextBlock x:Name="ModelStatusText" Text="" Foreground="#666" FontSize="11" Margin="0,4,0,0"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="3" Margin="0,8,0,8" Orientation="Horizontal">
+            <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Margin="0,0,20,0"/>
+        </StackPanel>
+
+        <TextBox Grid.Row="4" x:Name="LogBox" IsReadOnly="True"
+                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                 FontFamily="Consolas" FontSize="11" Margin="0,8,0,8"/>
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <TextBlock Text="Hotkey: Alt+Space" Foreground="#666" VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <Button x:Name="MinimizeBtn" Content="Hide to tray" Padding="12,6" Click="MinimizeBtn_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,0 +1,61 @@
+name: Build Taptalk Windows Installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout whisper.cpp
+        run: |
+          git clone --depth 1 --branch master https://github.com/ggml-org/whisper.cpp.git whisper.cpp
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build whisper.dll (AVX-512)
+        working-directory: native
+        run: |
+          cmake -B build -DWHISPER_SRC_DIR="$env:GITHUB_WORKSPACE\whisper.cpp" -G "Visual Studio 17 2022" -A x64 -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_SERVER=OFF
+          cmake --build build --config Release --target whisper
+
+      - name: Copy whisper.dll to engine output
+        run: |
+          New-Item -ItemType Directory -Force -Path "Taptalk.Engine.Whisper\bin\Release"
+          Copy-Item "native\build\bin\Release\whisper.dll" "Taptalk.Engine.Whisper\bin\Release\whisper.dll" -Force
+
+      - name: Restore + Build solution (Release x64)
+        run: |
+          dotnet restore Taptalk.sln
+          dotnet publish Taptalk.WPF -c Release -r win-x64 --self-contained true -o publish
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Compile installer
+        working-directory: installer
+        run: |
+          iscc /DAppDir="..\publish" Taptalk.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Taptalk-Setup
+          path: installer/Output/*.exe
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: installer/Output/*.exe

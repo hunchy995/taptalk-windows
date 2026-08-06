@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>Taptalk.Engine.Whisper</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Taptalk.Core\Taptalk.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Native whisper.dll must be copied to output -->
+  <ItemGroup>
+    <None Include="..\native\build\bin\Release\whisper.dll" Condition="Exists('..\native\build\bin\Release\whisper.dll')">
+      <Link>whisper.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
