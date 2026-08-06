@@ -5,6 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using Point = System.Windows.Point;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
+using Color = System.Windows.Media.Color;
 
 namespace Taptalk.WPF;
 

@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Windows;
+using IDataObject = System.Windows.IDataObject;
+using Clipboard = System.Windows.Clipboard;
 
 namespace Taptalk.WPF;
 

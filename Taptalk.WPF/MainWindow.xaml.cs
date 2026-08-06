@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using Microsoft.Win32;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using Taptalk.Core;
 using Taptalk.Engine.Parakeet;
 using Taptalk.Engine.Whisper;
