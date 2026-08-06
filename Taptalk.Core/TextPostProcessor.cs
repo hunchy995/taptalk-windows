@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace Taptalk.Core;
 
 public static class TextPostProcessor
