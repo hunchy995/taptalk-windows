@@ -29,12 +29,12 @@ public sealed class WhisperEngine : ISttEngine
         var nThreads = Math.Max(2, Environment.ProcessorCount / 2);
         var p = Native.whisper_full_default_params((int)SamplingStrategy.WhisperSamplingGreedy);
         p.n_threads = nThreads;
-        p.single_segment = true;
-        p.no_context = true;
-        p.suppress_blank = true;
+        p.single_segment = 1;
+        p.no_context = 1;
+        p.suppress_blank = 1;
         p.language = Marshal.StringToHGlobalAnsi("en");
 
-        Native.whisper_full(_ctx, ref p, audio, (uint)audio.Length);
+        Native.whisper_full(_ctx, p, audio, audio.Length);
         Marshal.FreeHGlobal(p.language);
 
         int n = Native.whisper_full_n_segments(_ctx);
@@ -70,7 +70,7 @@ public sealed class WhisperEngine : ISttEngine
         public static extern WhisperParams whisper_full_default_params(int strategy);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int whisper_full(IntPtr ctx, ref WhisperParams p, float[] samples, uint n_samples);
+        public static extern int whisper_full(IntPtr ctx, WhisperParams p, float[] samples, int n_samples);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern int whisper_full_n_segments(IntPtr ctx);
@@ -82,55 +82,68 @@ public sealed class WhisperEngine : ISttEngine
     [StructLayout(LayoutKind.Sequential)]
     private struct WhisperParams
     {
-        public int strategy;
+        public int strategy;          // enum whisper_sampling_strategy (int)
         public int n_threads;
         public int n_max_text_ctx;
         public int offset_ms;
         public int duration_ms;
-        public int translate;
-        public int no_context;
-        public int single_segment;
-        public int print_special;
-        public int print_progress;
-        public int print_realtime;
-        public int print_timestamps;
-        public int token_timestamps;
-        public int thold_pt;
-        public int thold_ptsum;
+        public byte translate;
+        public byte no_context;
+        public byte no_timestamps;
+        public byte single_segment;
+        public byte print_special;
+        public byte print_progress;
+        public byte print_realtime;
+        public byte print_timestamps;
+        public byte token_timestamps;
+        public float thold_pt;
+        public float thold_ptsum;
         public int max_len;
-        public int split_on_word;
+        public byte split_on_word;
         public int max_tokens;
-        public int debug_mode;
+        public byte debug_mode;
         public int audio_ctx;
-        public int tdrz_enable;
+        public byte tdrz_enable;
+        public IntPtr suppress_regex;
+        public IntPtr initial_prompt;
+        public byte carry_initial_prompt;
+        public IntPtr prompt_tokens;
+        public int prompt_n_tokens;
         public IntPtr language;
-        public int suppress_blank;
-        public IntPtr suppress_tokens;
-        public int suppress_nst;
-        public int temperature;
+        public byte detect_language;
+        public byte suppress_blank;
+        public byte suppress_nst;
+        public float temperature;
         public float max_initial_ts;
         public float length_penalty;
         public float temperature_inc;
         public float entropy_thold;
         public float logprob_thold;
         public float no_speech_thold;
+        public int greedy_best_of;    // struct { int best_of; } greedy;
+        public int beam_size;         // struct { int beam_size; float patience; } beam_search;
+        public float beam_patience;
+        public IntPtr new_segment_callback;
+        public IntPtr new_segment_callback_user_data;
+        public IntPtr progress_callback;
+        public IntPtr progress_callback_user_data;
+        public IntPtr encoder_begin_callback;
+        public IntPtr encoder_begin_callback_user_data;
+        public IntPtr abort_callback;
+        public IntPtr abort_callback_user_data;
+        public IntPtr logits_filter_callback;
+        public IntPtr logits_filter_callback_user_data;
         public IntPtr grammar_rules;
         public ulong n_grammar_rules;
-        public int i_start_rule;
-        public int grammar_penalty;
-        public int n_threads_batch;
-        public int speed_up;
-        public int debug_mode_timestamps;
-        public int token_timestamps_thold_pt;
-        public int flash_attn;
-        public int gpu_device;
-        public int no_timestamps;
-        public int use_gpu;
-        public int greedy_best_of;
-        public int beam_size;
-        public float beam_patience;
-        public IntPtr seq;
-        public int n_seq;
-        public int last_n_tokens;
+        public ulong i_start_rule;
+        public float grammar_penalty;
+        public byte vad;
+        public IntPtr vad_model_path;
+        public float vad_threshold;            // whisper_vad_params (by value)
+        public int vad_min_speech_duration_ms;
+        public int vad_min_silence_duration_ms;
+        public float vad_max_speech_duration_s;
+        public int vad_speech_pad_ms;
+        public float vad_samples_overlap;
     }
 }

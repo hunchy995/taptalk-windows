@@ -110,7 +110,7 @@ public sealed class MelScaleFeaturizer
         for (int i = 1, j = 0; i < n; i++)
         {
             int bit = n >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
+            while ((j & bit) != 0) { j ^= bit; bit >>= 1; }
             j ^= bit;
             if (i < j)
             {

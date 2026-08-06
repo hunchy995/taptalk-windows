@@ -17,7 +17,7 @@ jobs:
 
       - name: Checkout whisper.cpp
         run: |
-          git clone --depth 1 --branch master https://github.com/ggml-org/whisper.cpp.git whisper.cpp
+          git clone --depth 1 --branch v1.9.2 https://github.com/ggml-org/whisper.cpp.git whisper.cpp
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4

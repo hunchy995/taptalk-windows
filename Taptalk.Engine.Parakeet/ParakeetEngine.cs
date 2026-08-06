@@ -17,6 +17,8 @@ public sealed class ParakeetEngine : ISttEngine
     private InferenceSession? _session;
     private readonly MelScaleFeaturizer _featurizer = new();
     private readonly string _modelPath;
+    private readonly RunOptions _runOptions = new();
+    private readonly string[] _outputNames;
 
     public ParakeetEngine(string modelPath) => _modelPath = modelPath;
 
@@ -31,6 +33,7 @@ public sealed class ParakeetEngine : ISttEngine
             };
             dmlOptions.AppendExecutionProvider_DML(0);
             _session = new InferenceSession(modelPath, dmlOptions);
+            _outputNames = _session.OutputMetadata.Keys.ToArray();
             return true;
         }
         catch
@@ -39,6 +42,7 @@ public sealed class ParakeetEngine : ISttEngine
             try
             {
                 _session = new InferenceSession(modelPath);
+                _outputNames = _session.OutputMetadata.Keys.ToArray();
                 return true;
             }
             catch
@@ -76,12 +80,11 @@ public sealed class ParakeetEngine : ISttEngine
             for (int m = 0; m < melBins; m++)
                 input[idx++] = features[m, f];
 
-        using var inputTensor = OrtValue.CreateTensorValueFromMemory(
-            new[] { 1, melBins, frames }, input, 0, 3);
+        using var inputTensor = OrtValue.CreateTensorValueFromMemory(input.AsMemory(), new long[] { 1, melBins, frames });
 
         var inputs = new Dictionary<string, OrtValue> { ["input"] = inputTensor };
 
-        using var results = _session.Run(inputs);
+        using var results = _session.Run(_runOptions, inputs, _outputNames);
 
         // Assume first output is logits; get argmax per timestep → tokens
         var output = results[0];
