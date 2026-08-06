@@ -88,7 +88,7 @@ public sealed class ParakeetEngine : ISttEngine
 
         // Assume first output is logits; get argmax per timestep → tokens
         var output = results[0];
-        var shapeInfo = output.GetTensorTypeAndShapeInfo();
+        var shapeInfo = output.GetTensorTypeAndShape();
         var shape = shapeInfo.Shape;
         // [1, T, vocab] typical for TDT
         long T = shape.Length >= 2 ? shape[^2] : 1;
