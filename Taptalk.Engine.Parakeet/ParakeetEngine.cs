@@ -18,7 +18,7 @@ public sealed class ParakeetEngine : ISttEngine
     private readonly MelScaleFeaturizer _featurizer = new();
     private readonly string _modelPath;
     private readonly RunOptions _runOptions = new();
-    private readonly string[] _outputNames;
+    private string[] _outputNames = Array.Empty<string>();
 
     public ParakeetEngine(string modelPath) => _modelPath = modelPath;
 
@@ -80,7 +80,7 @@ public sealed class ParakeetEngine : ISttEngine
             for (int m = 0; m < melBins; m++)
                 input[idx++] = features[m, f];
 
-        using var inputTensor = OrtValue.CreateTensorValueFromMemory(input.AsMemory(), new long[] { 1, melBins, frames });
+        using var inputTensor = OrtValue.CreateTensorValueFromMemory(input, new long[] { 1, melBins, frames });
 
         var inputs = new Dictionary<string, OrtValue> { ["input"] = inputTensor };
 
@@ -88,20 +88,21 @@ public sealed class ParakeetEngine : ISttEngine
 
         // Assume first output is logits; get argmax per timestep → tokens
         var output = results[0];
-        var shape = output.Shape;
+        var shapeInfo = output.GetTensorTypeAndShapeInfo();
+        var shape = shapeInfo.Shape;
         // [1, T, vocab] typical for TDT
         long T = shape.Length >= 2 ? shape[^2] : 1;
         long V = shape.Length >= 1 ? shape[^1] : 1;
 
         var logits = output.GetTensorDataAsSpan<float>();
         var tokens = new List<int>();
-        for (int t = 0; t < T; t++)
+        for (int t = 0; t < (int)T; t++)
         {
             int best = 0;
             float bestVal = float.MinValue;
-            for (int v = 0; v < V; v++)
+            for (int v = 0; v < (int)V; v++)
             {
-                float val = logits[t * V + v];
+                float val = logits[t * (int)V + v];
                 if (val > bestVal) { bestVal = val; best = v; }
             }
             tokens.Add(best);
