@@ -86,36 +86,17 @@ public partial class MainWindow : Window
         _sessionTimer.Restart();
         _capture.Start();
         _overlay?.SetRecording();
+        StartPartialTimer();
         Log($"🎤 Recording started ({DateTime.Now:HH:mm:ss})");
     }
 
     private DateTime _lastPartial = DateTime.MinValue;
     private string _lastPartialText = "";
+    private System.Windows.Threading.DispatcherTimer? _partialTimer;
 
     private void CheckVad(float[] chunk)
     {
         if (!_capture.IsRecording || _engine == null) return;
-
-        // Live partial transcription: every ~1.5s while recording, show what's heard so far
-        if ((DateTime.Now - _lastPartial).TotalMilliseconds >= 1500)
-        {
-            _lastPartial = DateTime.Now;
-            var audio = _capture.GetSnapshot();
-            if (audio.Length >= _engine.MinSamplesForPartial)
-            {
-                try
-                {
-                    var partial = Task.Run(() => _engine!.TranscribePartial(audio)).Result;
-                    var cleaned = TextPostProcessor.Clean(partial);
-                    if (!string.IsNullOrWhiteSpace(cleaned) && cleaned != _lastPartialText)
-                    {
-                        _lastPartialText = cleaned;
-                        Log($"🎙️ {cleaned}");
-                    }
-                }
-                catch { /* partial transcription is best-effort */ }
-            }
-        }
 
         if (!AutoStopChk.IsChecked.GetValueOrDefault(true)) return;
 
@@ -129,10 +110,45 @@ public partial class MainWindow : Window
         }
     }
 
+    private void StartPartialTimer()
+    {
+        _partialTimer?.Stop();
+        _partialTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(1500)
+        };
+        _partialTimer.Tick += async (_, _) =>
+        {
+            if (!_capture.IsRecording || _engine == null) return;
+            var audio = _capture.GetSnapshot();
+            if (audio.Length < _engine.MinSamplesForPartial) return;
+            try
+            {
+                // Runs on UI thread — never blocks the NAudio callback thread
+                var partial = await Task.Run(() => _engine!.TranscribePartial(audio));
+                var cleaned = TextPostProcessor.Clean(partial);
+                if (!string.IsNullOrWhiteSpace(cleaned) && cleaned != _lastPartialText)
+                {
+                    _lastPartialText = cleaned;
+                    Log($"🎙️ {cleaned}");
+                }
+            }
+            catch { /* partial transcription is best-effort */ }
+        };
+        _partialTimer.Start();
+    }
+
+    private void StopPartialTimer()
+    {
+        _partialTimer?.Stop();
+        _partialTimer = null;
+    }
+
     private async Task StopAndTranscribeAsync()
     {
         _isTranscribing = true;
         _lastPartialText = "";
+        StopPartialTimer();
         try
         {
             _capture.Stop();

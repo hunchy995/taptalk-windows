@@ -13,6 +13,7 @@ public sealed class AudioCapture : IDisposable
     private WaveInEvent? _waveIn;
     private readonly List<float> _pcmSamples = new();
     private readonly object _lock = new();
+    private int _generation; // incremented each Start; stale RecordingStopped events ignored
 
     public event Action<float[]>? OnChunk; // raised every ~250ms with new PCM
 
@@ -24,22 +25,29 @@ public sealed class AudioCapture : IDisposable
         if (IsRecording) return;
         lock (_lock) _pcmSamples.Clear();
 
-        _waveIn = new WaveInEvent
+        var gen = ++_generation;
+        var waveIn = new WaveInEvent
         {
             WaveFormat = new WaveFormat(SampleRate, 16, 1),
             BufferMilliseconds = 250
         };
-        _waveIn.DataAvailable += OnDataAvailable;
-        _waveIn.RecordingStopped += (_, _) => IsRecording = false;
-        _waveIn.StartRecording();
+        waveIn.DataAvailable += OnDataAvailable;
+        waveIn.RecordingStopped += (_, _) =>
+        {
+            // Ignore events from a previous (stale) capture session
+            if (gen == _generation) IsRecording = false;
+        };
+        _waveIn = waveIn;
+        waveIn.StartRecording();
         IsRecording = true;
     }
 
     public void Stop()
     {
-        _waveIn?.StopRecording();
-        _waveIn?.Dispose();
+        var w = _waveIn;
         _waveIn = null;
+        w?.StopRecording();
+        w?.Dispose();
         IsRecording = false;
     }
 

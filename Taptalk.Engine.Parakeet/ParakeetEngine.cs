@@ -103,15 +103,18 @@ public sealed class ParakeetEngine : ISttEngine
         using var inputTensor = OrtValue.CreateTensorValueFromMemory(input, new long[] { 1, melBins, frames });
 
         var inputs = new Dictionary<string, OrtValue> { [_inputName] = inputTensor };
+        OrtValue? lenTensor = null;
         if (_hasLengthInput)
         {
             // length = number of frames AFTER 8x subsampling (per config subsampling_factor=8)
+            // NOTE: do NOT use 'using var' here — it would dispose before Run() below
             long len = Math.Max(1, frames / 8);
-            using var lenTensor = OrtValue.CreateTensorValueFromMemory(new long[] { len }, new long[] { 1 });
+            lenTensor = OrtValue.CreateTensorValueFromMemory(new long[] { len }, new long[] { 1 });
             inputs["length"] = lenTensor;
         }
 
         using var results = _session.Run(_runOptions, inputs, _outputNames);
+        lenTensor?.Dispose();
 
         // Assume first output is logits; get argmax per timestep → tokens
         var output = results[0];
