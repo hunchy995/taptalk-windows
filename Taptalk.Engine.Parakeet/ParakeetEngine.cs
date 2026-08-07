@@ -13,14 +13,34 @@ public sealed class ParakeetEngine : ISttEngine
     public string Name => "Parakeet (GPU)";
     public bool IsLoaded => _session != null;
     public bool RequiresModelFile => true;
+    public int MinSamplesForPartial => 8000; // 0.5s @16kHz
 
     private InferenceSession? _session;
     private readonly MelScaleFeaturizer _featurizer = new();
     private readonly string _modelPath;
     private readonly RunOptions _runOptions = new();
     private string[] _outputNames = Array.Empty<string>();
+    private string _inputName = "input";
+    private bool _hasLengthInput;
 
     public ParakeetEngine(string modelPath) => _modelPath = modelPath;
+
+    private void ReadModelMetadata()
+    {
+        if (_session == null) return;
+        _outputNames = _session.OutputMetadata.Keys.ToArray();
+        // Pick the first non-length float input as the audio input
+        foreach (var kv in _session.InputMetadata)
+        {
+            var name = kv.Key;
+            if (name.Equals("length", StringComparison.OrdinalIgnoreCase))
+            {
+                _hasLengthInput = true;
+                continue;
+            }
+            if (_inputName == "input") _inputName = name;
+        }
+    }
 
     public bool LoadModel(string modelPath)
     {
@@ -33,7 +53,7 @@ public sealed class ParakeetEngine : ISttEngine
             };
             dmlOptions.AppendExecutionProvider_DML(0);
             _session = new InferenceSession(modelPath, dmlOptions);
-            _outputNames = _session.OutputMetadata.Keys.ToArray();
+            ReadModelMetadata();
             return true;
         }
         catch
@@ -42,7 +62,7 @@ public sealed class ParakeetEngine : ISttEngine
             try
             {
                 _session = new InferenceSession(modelPath);
-                _outputNames = _session.OutputMetadata.Keys.ToArray();
+                ReadModelMetadata();
                 return true;
             }
             catch
@@ -82,7 +102,14 @@ public sealed class ParakeetEngine : ISttEngine
 
         using var inputTensor = OrtValue.CreateTensorValueFromMemory(input, new long[] { 1, melBins, frames });
 
-        var inputs = new Dictionary<string, OrtValue> { ["input"] = inputTensor };
+        var inputs = new Dictionary<string, OrtValue> { [_inputName] = inputTensor };
+        if (_hasLengthInput)
+        {
+            // length = number of frames AFTER 8x subsampling (per config subsampling_factor=8)
+            long len = Math.Max(1, frames / 8);
+            using var lenTensor = OrtValue.CreateTensorValueFromMemory(new long[] { len }, new long[] { 1 });
+            inputs["length"] = lenTensor;
+        }
 
         using var results = _session.Run(_runOptions, inputs, _outputNames);
 
@@ -90,7 +117,7 @@ public sealed class ParakeetEngine : ISttEngine
         var output = results[0];
         var shapeInfo = output.GetTensorTypeAndShape();
         var shape = shapeInfo.Shape;
-        // [1, T, vocab] typical for TDT
+        // [1, T, vocab] typical for CTC models
         long T = shape.Length >= 2 ? shape[^2] : 1;
         long V = shape.Length >= 1 ? shape[^1] : 1;
 

@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     private OverlayWindow? _overlay;
     private System.Windows.Forms.NotifyIcon? _tray;
     private CancellationTokenSource? _cts;
+    private bool _isTranscribing;
     private readonly Stopwatch _sessionTimer = new();
 
     public MainWindow()
@@ -61,6 +62,9 @@ public partial class MainWindow : Window
 
     private void OnMicTap()
     {
+        // Ignore taps while transcribing — prevents "click again starts a new recording"
+        if (_isTranscribing) return;
+
         if (_engine == null || !_engine.IsLoaded)
         {
             Log("⚠️ No model loaded — click Browse and select a model file first.");
@@ -85,9 +89,34 @@ public partial class MainWindow : Window
         Log($"🎤 Recording started ({DateTime.Now:HH:mm:ss})");
     }
 
+    private DateTime _lastPartial = DateTime.MinValue;
+    private string _lastPartialText = "";
+
     private void CheckVad(float[] chunk)
     {
         if (!_capture.IsRecording || _engine == null) return;
+
+        // Live partial transcription: every ~1.5s while recording, show what's heard so far
+        if ((DateTime.Now - _lastPartial).TotalMilliseconds >= 1500)
+        {
+            _lastPartial = DateTime.Now;
+            var audio = _capture.GetSnapshot();
+            if (audio.Length >= _engine.MinSamplesForPartial)
+            {
+                try
+                {
+                    var partial = Task.Run(() => _engine!.TranscribePartial(audio)).Result;
+                    var cleaned = TextPostProcessor.Clean(partial);
+                    if (!string.IsNullOrWhiteSpace(cleaned) && cleaned != _lastPartialText)
+                    {
+                        _lastPartialText = cleaned;
+                        Log($"🎙️ {cleaned}");
+                    }
+                }
+                catch { /* partial transcription is best-effort */ }
+            }
+        }
+
         if (!AutoStopChk.IsChecked.GetValueOrDefault(true)) return;
 
         // Don't auto-stop in first 1.5s
@@ -102,38 +131,47 @@ public partial class MainWindow : Window
 
     private async Task StopAndTranscribeAsync()
     {
-        _capture.Stop();
-        _overlay?.SetProcessing();
-        Log("⏳ Transcribing...");
-
-        var audio = _capture.GetSnapshot();
-        var ms = _sessionTimer.ElapsedMilliseconds;
-        Log($"   {audio.Length / 16.0f / 1000.0f:F1}s audio captured ({audio.Length} samples)");
-
+        _isTranscribing = true;
+        _lastPartialText = "";
         try
         {
-            var sw = Stopwatch.StartNew();
-            var raw = await Task.Run(() => _engine!.Transcribe(audio));
-            sw.Stop();
-            var rtf = sw.ElapsedMilliseconds / (float)ms;
-            Log($"⏱️ Inference: {sw.ElapsedMilliseconds}ms (RTF {rtf:F2}x)");
+            _capture.Stop();
+            _overlay?.SetProcessing();
+            Log("⏳ Transcribing...");
 
-            var cleaned = TextPostProcessor.Clean(raw);
-            Log($"📝 \"{cleaned}\"");
+            var audio = _capture.GetSnapshot();
+            var ms = _sessionTimer.ElapsedMilliseconds;
+            Log($"   {audio.Length / 16.0f / 1000.0f:F1}s audio captured ({audio.Length} samples)");
 
-            if (!string.IsNullOrWhiteSpace(cleaned))
-                await TextInjector.InjectTextAsync(cleaned);
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                var raw = await Task.Run(() => _engine!.Transcribe(audio));
+                sw.Stop();
+                var rtf = sw.ElapsedMilliseconds / (float)Math.Max(1, ms);
+                Log($"⏱️ Inference: {sw.ElapsedMilliseconds}ms (RTF {rtf:F2}x)");
 
-            _overlay?.SetDone();
-            await Task.Delay(900);
-        }
-        catch (Exception ex)
-        {
-            Log($"❌ Error: {ex.Message}");
+                var cleaned = TextPostProcessor.Clean(raw);
+                Log($"📝 \"{cleaned}\"");
+
+                if (!string.IsNullOrWhiteSpace(cleaned))
+                    await TextInjector.InjectTextAsync(cleaned);
+
+                _overlay?.SetDone();
+                await Task.Delay(900);
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ Error: {ex.Message}");
+            }
+            finally
+            {
+                _overlay?.SetIdle();
+            }
         }
         finally
         {
-            _overlay?.SetIdle();
+            _isTranscribing = false;
         }
     }
 

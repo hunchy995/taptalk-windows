@@ -17,4 +17,7 @@ public interface ISttEngine : IDisposable
 
     /// <summary>Transcribe partial audio during streaming (progressive buffer).</summary>
     string TranscribePartial(float[] audio);
+
+    /// <summary>Minimum samples (16kHz mono) for a meaningful partial transcription (~0.5s).</summary>
+    int MinSamplesForPartial { get; }
 }

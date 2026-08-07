@@ -12,6 +12,7 @@ public sealed class WhisperEngine : ISttEngine
     public string Name => "Whisper (CPU)";
     public bool IsLoaded => _ctx != IntPtr.Zero;
     public bool RequiresModelFile => true;
+    public int MinSamplesForPartial => 8000; // 0.5s @16kHz
 
     private IntPtr _ctx;
 
