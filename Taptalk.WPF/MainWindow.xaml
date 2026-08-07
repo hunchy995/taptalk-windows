@@ -36,7 +36,7 @@
 
         <StackPanel Grid.Row="3" Margin="0,8,0,8">
             <StackPanel Orientation="Horizontal">
-                <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Margin="0,0,20,0"/>
+                <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Margin="0,0,20,0" Checked="AutoStopChk_Checked" Unchecked="AutoStopChk_Checked"/>
             </StackPanel>
             <TextBlock Text="Microphone:" FontWeight="SemiBold" Margin="0,10,0,0"/>
             <DockPanel Margin="0,4,0,0">

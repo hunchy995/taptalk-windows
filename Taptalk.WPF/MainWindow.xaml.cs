@@ -20,6 +20,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _cts;
     private bool _isTranscribing;
     private bool _recordingRequested; // OUR intent — device may stop itself (mic perms), we still know user asked
+    private bool _autoStop = true;    // cached on UI thread; read from audio thread safely
     private readonly Stopwatch _sessionTimer = new();
 
     public MainWindow()
@@ -120,12 +121,15 @@ public partial class MainWindow : Window
         if (!_warnedNoAudio && _sessionTimer.ElapsedMilliseconds > 2500 && _capture.TotalSamples < 4000)
         {
             _warnedNoAudio = true;
-            Log("⚠️ No audio detected — Windows may be blocking the microphone.");
-            Dispatcher.Invoke(() => MicStatusText.Text =
-                "No audio is reaching Taptalk. Click 'Mic Privacy' and allow microphone access, then try again.");
+            Dispatcher.BeginInvoke(() =>
+            {
+                Log("⚠️ No audio detected — Windows may be blocking the microphone.");
+                MicStatusText.Text =
+                    "No audio is reaching Taptalk. Click 'Mic Privacy' and allow microphone access, then try again.";
+            });
         }
 
-        if (!AutoStopChk.IsChecked.GetValueOrDefault(true)) return;
+        if (!_autoStop) return;
 
         // Don't auto-stop in first 1.5s
         if (_sessionTimer.ElapsedMilliseconds < 1500) return;
@@ -288,6 +292,11 @@ public partial class MainWindow : Window
             ModelStatusText.Text = $"❌ {ex.Message}";
             Log($"❌ Engine load error: {ex.Message}");
         }
+    }
+
+    private void AutoStopChk_Checked(object sender, RoutedEventArgs e)
+    {
+        _autoStop = AutoStopChk.IsChecked.GetValueOrDefault(true);
     }
 
     private void MicCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
