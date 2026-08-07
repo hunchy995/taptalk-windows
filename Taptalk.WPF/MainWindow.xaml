@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Taptalk Settings"
-        Width="420" Height="520"
+        Width="440" Height="600"
         WindowStartupLocation="CenterScreen">
 
     <Grid Margin="20">
@@ -34,8 +34,16 @@
             <TextBlock x:Name="ModelStatusText" Text="" Foreground="#666" FontSize="11" Margin="0,4,0,0"/>
         </StackPanel>
 
-        <StackPanel Grid.Row="3" Margin="0,8,0,8" Orientation="Horizontal">
-            <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Margin="0,0,20,0"/>
+        <StackPanel Grid.Row="3" Margin="0,8,0,8">
+            <StackPanel Orientation="Horizontal">
+                <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Margin="0,0,20,0"/>
+            </StackPanel>
+            <TextBlock Text="Microphone:" FontWeight="SemiBold" Margin="0,10,0,0"/>
+            <DockPanel Margin="0,4,0,0">
+                <Button x:Name="MicSettingsBtn" Content="🔧 Mic Privacy" DockPanel.Dock="Right" Padding="8,4" Margin="6,0,0,0" Click="MicSettingsBtn_Click"/>
+                <ComboBox x:Name="MicCombo" Margin="0,0,0,0" SelectionChanged="MicCombo_SelectionChanged"/>
+            </DockPanel>
+            <TextBlock x:Name="MicStatusText" Text="" Foreground="#C0392B" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
         </StackPanel>
 
         <TextBox Grid.Row="4" x:Name="LogBox" IsReadOnly="True"

@@ -19,6 +19,7 @@ public partial class MainWindow : Window
     private System.Windows.Forms.NotifyIcon? _tray;
     private CancellationTokenSource? _cts;
     private bool _isTranscribing;
+    private bool _recordingRequested; // OUR intent — device may stop itself (mic perms), we still know user asked
     private readonly Stopwatch _sessionTimer = new();
 
     public MainWindow()
@@ -31,6 +32,20 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
     {
+        // Microphone list (0 = Windows default)
+        var mics = AudioCapture.EnumerateDevices();
+        MicCombo.ItemsSource = mics;
+        MicCombo.SelectedIndex = 0;
+        Log($"🎤 {mics.Count} microphone(s) found — using default");
+
+        // Surface mic device failures with privacy guidance
+        _capture.OnError += msg =>
+        {
+            Log($"❌ Microphone error: {msg}");
+            Dispatcher.Invoke(() => MicStatusText.Text =
+                "Microphone is blocked. Windows needs permission to use your mic.\nClick 'Mic Privacy' and allow Taptalk, then restart recording.");
+        };
+
         // Overlay
         _overlay = new OverlayWindow();
         _overlay.OnTap += OnMicTap;
@@ -73,7 +88,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_capture.IsRecording)
+        if (_recordingRequested || _capture.IsRecording)
             _ = StopAndTranscribeAsync();
         else
             StartRecording();
@@ -81,6 +96,8 @@ public partial class MainWindow : Window
 
     private void StartRecording()
     {
+        _recordingRequested = true;
+        _warnedNoAudio = false;
         _cts = new CancellationTokenSource();
         _vad.Reset();
         _sessionTimer.Restart();
@@ -93,10 +110,20 @@ public partial class MainWindow : Window
     private DateTime _lastPartial = DateTime.MinValue;
     private string _lastPartialText = "";
     private System.Windows.Threading.DispatcherTimer? _partialTimer;
+    private bool _warnedNoAudio;
 
     private void CheckVad(float[] chunk)
     {
         if (!_capture.IsRecording || _engine == null) return;
+
+        // If we've been recording >2.5s and got almost no audio, the mic is blocked
+        if (!_warnedNoAudio && _sessionTimer.ElapsedMilliseconds > 2500 && _capture.TotalSamples < 4000)
+        {
+            _warnedNoAudio = true;
+            Log("⚠️ No audio detected — Windows may be blocking the microphone.");
+            Dispatcher.Invoke(() => MicStatusText.Text =
+                "No audio is reaching Taptalk. Click 'Mic Privacy' and allow microphone access, then try again.");
+        }
 
         if (!AutoStopChk.IsChecked.GetValueOrDefault(true)) return;
 
@@ -147,6 +174,7 @@ public partial class MainWindow : Window
     private async Task StopAndTranscribeAsync()
     {
         _isTranscribing = true;
+        _recordingRequested = false;
         _lastPartialText = "";
         StopPartialTimer();
         try
@@ -259,6 +287,37 @@ public partial class MainWindow : Window
         {
             ModelStatusText.Text = $"❌ {ex.Message}";
             Log($"❌ Engine load error: {ex.Message}");
+        }
+    }
+
+    private void MicCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (MicCombo.SelectedIndex < 0) return;
+        _capture.DeviceIndex = MicCombo.SelectedIndex;
+        // If we're mid-recording, restart with the new device
+        if (_recordingRequested || _capture.IsRecording)
+        {
+            Log($"🎤 Switching to: {MicCombo.SelectedItem} — restarting capture");
+            _capture.Stop();
+            _capture.Start();
+        }
+        else
+        {
+            Log($"🎤 Microphone: {MicCombo.SelectedItem}");
+        }
+        MicStatusText.Text = "";
+    }
+
+    private void MicSettingsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        // Open Windows 10/11 microphone privacy settings
+        try
+        {
+            System.Diagnostics.Process.Start(new ProcessStartInfo("ms-settings:privacy-microphone") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Could not open mic settings: {ex.Message}");
         }
     }
 

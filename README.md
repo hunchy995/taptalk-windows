@@ -54,6 +54,12 @@ Download any GGML model: https://huggingface.co/ggerganov/whisper.cpp/tree/main
 - `ggml-base.en.bin` (150MB) — good balance
 - In the app: Settings → Engine: Whisper → Browse → select the .bin file
 
+## First-run setup
+
+1. **Allow microphone access** — Windows will ask; if it didn't, open Settings → Privacy & security → Microphone → "Let desktop apps access your microphone" → On. Or click the **🔧 Mic Privacy** button in Taptalk.
+2. Pick your microphone in Settings → Microphone (default = Windows default mic).
+3. Download a model (see below).
+
 ## Usage
 
 - **Alt+Space** — start/stop recording (push-to-talk)

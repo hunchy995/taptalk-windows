@@ -16,9 +16,31 @@ public sealed class AudioCapture : IDisposable
     private int _generation; // incremented each Start; stale RecordingStopped events ignored
 
     public event Action<float[]>? OnChunk; // raised every ~250ms with new PCM
+    public event Action<string>? OnError;  // raised when the capture device fails
+
+    /// <summary>0 = Windows default input device.</summary>
+    public int DeviceIndex { get; set; }
 
     public bool IsRecording { get; private set; }
     public int TotalSamples { get { lock (_lock) return _pcmSamples.Count; } }
+
+    /// <summary>Enumerate available input devices (0 = default).</summary>
+    public static List<string> EnumerateDevices()
+    {
+        var names = new List<string>();
+        try
+        {
+            int count = WaveInEvent.DeviceCount;
+            for (int i = 0; i < count; i++)
+            {
+                var caps = WaveInEvent.GetCapabilities(i);
+                names.Add(caps.ProductName);
+            }
+        }
+        catch { /* no devices / enumeration failed */ }
+        if (names.Count == 0) names.Add("Default Microphone");
+        return names;
+    }
 
     public void Start()
     {
@@ -28,14 +50,20 @@ public sealed class AudioCapture : IDisposable
         var gen = ++_generation;
         var waveIn = new WaveInEvent
         {
+            DeviceNumber = DeviceIndex,
             WaveFormat = new WaveFormat(SampleRate, 16, 1),
             BufferMilliseconds = 250
         };
         waveIn.DataAvailable += OnDataAvailable;
-        waveIn.RecordingStopped += (_, _) =>
+        waveIn.RecordingStopped += (_, args) =>
         {
             // Ignore events from a previous (stale) capture session
-            if (gen == _generation) IsRecording = false;
+            if (gen == _generation)
+            {
+                IsRecording = false;
+                if (args.Exception != null)
+                    OnError?.Invoke(args.Exception.Message);
+            }
         };
         _waveIn = waveIn;
         waveIn.StartRecording();
