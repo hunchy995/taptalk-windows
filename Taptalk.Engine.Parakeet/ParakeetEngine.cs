@@ -1,3 +1,4 @@
+using System.IO;
 using Microsoft.ML.OnnxRuntime;
 using Taptalk.Core;
 
@@ -54,6 +55,7 @@ public sealed class ParakeetEngine : ISttEngine
             dmlOptions.AppendExecutionProvider_DML(0);
             _session = new InferenceSession(modelPath, dmlOptions);
             ReadModelMetadata();
+            AutoLoadSiblingVocab(modelPath);
             return true;
         }
         catch
@@ -63,6 +65,7 @@ public sealed class ParakeetEngine : ISttEngine
             {
                 _session = new InferenceSession(modelPath);
                 ReadModelMetadata();
+                AutoLoadSiblingVocab(modelPath);
                 return true;
             }
             catch
@@ -71,6 +74,30 @@ public sealed class ParakeetEngine : ISttEngine
                 return false;
             }
         }
+    }
+
+    /// <summary>Look for vocab.txt next to the model file and load it (case-insensitive).</summary>
+    private void AutoLoadSiblingVocab(string modelPath)
+    {
+        var dir = Path.GetDirectoryName(modelPath);
+        if (string.IsNullOrEmpty(dir)) return;
+
+        string? vocabPath = null;
+        try
+        {
+            var candidates = Directory.GetFiles(dir, "vocab.txt", SearchOption.TopDirectoryOnly);
+            if (candidates.Length > 0)
+                vocabPath = candidates[0];
+            else
+            {
+                var all = Directory.GetFiles(dir, "*.txt", SearchOption.TopDirectoryOnly);
+                vocabPath = all.FirstOrDefault(f => Path.GetFileName(f).StartsWith("vocab", StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        catch { return; }
+
+        if (vocabPath != null && LoadVocabularyFromFile(vocabPath))
+            System.Diagnostics.Debug.WriteLine($"[ParakeetEngine] Vocabulary loaded: {vocabPath}");
     }
 
     public string Transcribe(float[] audio)
@@ -154,23 +181,79 @@ public sealed class ParakeetEngine : ISttEngine
 
     private string DecodeTokens(List<int> tokens)
     {
-        // Simplified decoder — if a vocab file is present use it, else return raw IDs
-        if (_vocab != null)
+        if (_vocab == null || _vocab.Length == 0)
         {
-            var sb = new System.Text.StringBuilder();
-            foreach (var t in tokens)
-            {
-                if (t >= 0 && t < _vocab.Length)
-                    sb.Append(_vocab[t]);
-            }
-            return sb.ToString();
+            if (tokens.Count > 0)
+                return $"[No Vocab Loaded! Raw Tokens: {string.Join(" ", tokens)}]";
+            return "";
         }
-        return string.Join(" ", tokens);
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var t in tokens)
+        {
+            if (t >= 0 && t < _vocab.Length)
+            {
+                string token = _vocab[t];
+                if (string.IsNullOrEmpty(token)) continue;
+                // Skip special/control tokens (marked with <> or empty)
+                if (token.StartsWith("<") && token.EndsWith(">")) continue;
+                sb.Append(token);
+            }
+        }
+
+        string result = sb.ToString();
+        // SentencePiece space marker → real space
+        result = result.Replace("\u2581", " ");
+        result = System.Text.RegularExpressions.Regex.Replace(result, @"\s+", " ");
+        return result.Trim();
     }
 
     private string[]? _vocab;
 
     public void LoadVocabulary(string[] vocab) => _vocab = vocab;
+
+    /// <summary>Parse a vocab.txt ("token index" per line, SentencePiece format).</summary>
+    public bool LoadVocabularyFromFile(string vocabPath)
+    {
+        try
+        {
+            if (!File.Exists(vocabPath)) return false;
+
+            var lines = File.ReadAllLines(vocabPath);
+            int maxIndex = -1;
+            var entries = new List<(string token, int index)>();
+
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                int lastSpace = line.LastIndexOf(' ');
+                if (lastSpace > 0 && int.TryParse(line.Substring(lastSpace + 1), out int idx))
+                {
+                    entries.Add((line.Substring(0, lastSpace), idx));
+                    if (idx > maxIndex) maxIndex = idx;
+                }
+                else
+                {
+                    int fallback = entries.Count;
+                    entries.Add((line.Trim(), fallback));
+                    if (fallback > maxIndex) maxIndex = fallback;
+                }
+            }
+
+            int vocabSize = Math.Max(maxIndex + 1, 1025);
+            _vocab = new string[vocabSize];
+            foreach (var (token, index) in entries)
+            {
+                if (index >= 0 && index < _vocab.Length)
+                    _vocab[index] = token;
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public void Dispose() => _session?.Dispose();
 }

@@ -44,8 +44,9 @@ iscc /DAppDir="..\publish" Taptalk.iss
 ## Models
 
 ### Parakeet (default)
-Download: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
-- File: `parakeet-tdt-0.6b-v3.onnx` (~600MB fp32) or int8 variant
+Download: https://huggingface.co/istupakov/parakeet-ctc-0.6b-onnx
+- File: `model.onnx` (~600MB) — CTC single-file export
+- **Also download `vocab.txt` from the same page** and put it in the SAME folder as `model.onnx` (the app loads it automatically — without it, transcription comes back empty)
 - In the app: Settings → Engine: Parakeet → Browse → select the .onnx file
 
 ### Whisper
