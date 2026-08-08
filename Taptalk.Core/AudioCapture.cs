@@ -15,6 +15,15 @@ public sealed class AudioCapture : IDisposable
     private readonly object _lock = new();
     private int _generation; // incremented each Start; stale RecordingStopped events ignored
 
+    // Metrics for the debug logger (updated on the NAudio callback thread)
+    private long _totalSamplesCaptured;
+    private DateTime? _recordingStartTime;
+    private DateTime _lastAudioLogTime = DateTime.MinValue;
+    private int _chunksSinceLog;
+    private float _maxPeakInWindow;
+    private double _rmsSum;
+    private int _silenceRunsMs;
+
     public event Action<float[]>? OnChunk; // raised every ~100ms with new PCM
     public event Action<string>? OnError;  // raised when the capture device fails
 
@@ -41,12 +50,34 @@ public sealed class AudioCapture : IDisposable
         return names;
     }
 
+    public static string GetDeviceName(int index)
+    {
+        try
+        {
+            if (index < 0) return "System Default Microphone";
+            var caps = WaveInEvent.GetCapabilities(index);
+            return caps.ProductName;
+        }
+        catch { return $"Device {index}"; }
+    }
+
     public void Start()
     {
         if (IsRecording) return;
         lock (_lock) _pcmSamples.Clear();
 
+        // Reset metrics
+        _totalSamplesCaptured = 0;
+        _recordingStartTime = DateTime.Now;
+        _lastAudioLogTime = DateTime.Now;
+        _chunksSinceLog = 0;
+        _maxPeakInWindow = 0f;
+        _rmsSum = 0;
+        _silenceRunsMs = 0;
+
         var gen = ++_generation;
+        DebugRecorder.Log("REC", $"Initializing capture: DeviceIdx={DeviceNumber} Name='{GetDeviceName(DeviceNumber)}' 16kHz mono 100ms buffers");
+
         var waveIn = new WaveInEvent
         {
             DeviceNumber = DeviceNumber,
@@ -60,13 +91,18 @@ public sealed class AudioCapture : IDisposable
             if (gen == _generation)
             {
                 IsRecording = false;
+                LogStopMetrics();
                 if (args.Exception != null)
+                {
+                    DebugRecorder.Error("REC", "capture stopped with exception", args.Exception);
                     OnError?.Invoke(args.Exception.Message);
+                }
             }
         };
         _waveIn = waveIn;
         waveIn.StartRecording();
         IsRecording = true;
+        DebugRecorder.Log("REC", $"Recording started at {DateTime.Now:HH:mm:ss.fff}");
     }
 
     public void Stop()
@@ -85,21 +121,64 @@ public sealed class AudioCapture : IDisposable
         }
     }
 
+    private void LogStopMetrics()
+    {
+        double elapsedMs = _recordingStartTime.HasValue
+            ? (DateTime.Now - _recordingStartTime.Value).TotalMilliseconds
+            : 0;
+        double actualSec = _totalSamplesCaptured / (double)SampleRate;
+        double measuredRate = elapsedMs > 0
+            ? _totalSamplesCaptured / (elapsedMs / 1000.0)
+            : 0;
+        DebugRecorder.Log("REC",
+            $"Capture stopped. Samples={_totalSamplesCaptured} | Audio={actualSec:F2}s | Active={elapsedMs / 1000.0:F2}s | Rate={measuredRate:F0} samples/s (target {SampleRate})");
+    }
+
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
         if (!IsRecording) return;
 
         var samples = new float[e.BytesRecorded / 2];
+        float peak = 0f;
+        double sumSq = 0;
         for (int i = 0; i < samples.Length; i++)
         {
             // 16-bit little-endian PCM → float [-1, 1]
             short s = (short)(e.Buffer[i * 2] | (e.Buffer[i * 2 + 1] << 8));
-            samples[i] = s / 32768f;
+            float v = s / 32768f;
+            samples[i] = v;
+            float abs = Math.Abs(v);
+            if (abs > peak) peak = abs;
+            sumSq += v * v;
         }
 
+        double rms = samples.Length > 0 ? Math.Sqrt(sumSq / samples.Length) : 0;
+
         lock (_lock) _pcmSamples.AddRange(samples);
+        _totalSamplesCaptured += samples.Length;
+        _chunksSinceLog++;
+        if (peak > _maxPeakInWindow) _maxPeakInWindow = peak;
+        _rmsSum += rms;
+
+        // Throttled audio metrics every ~1s (10 chunks of 100ms)
+        var now = DateTime.Now;
+        if ((now - _lastAudioLogTime).TotalMilliseconds >= 1000)
+        {
+            double avgRms = _chunksSinceLog > 0 ? _rmsSum / _chunksSinceLog : 0;
+            double totalSec = _totalSamplesCaptured / (double)SampleRate;
+            DebugRecorder.Log("AUDIO",
+                $"Buffered={totalSec:F2}s | Chunks={_chunksSinceLog} | Peak={_maxPeakInWindow:F4} | AvgRMS={avgRms:F4} | Silence={_silenceRunsMs}ms");
+            _lastAudioLogTime = now;
+            _chunksSinceLog = 0;
+            _maxPeakInWindow = 0f;
+            _rmsSum = 0;
+        }
+
         OnChunk?.Invoke(samples);
     }
+
+    /// <summary>Called by VAD on the callback thread when silence is detected (never blocks).</summary>
+    public void NoteSilence(int ms) => _silenceRunsMs = ms;
 
     /// <summary>Snapshot of all PCM captured so far (zero-copy copy).</summary>
     public float[] GetSnapshot()

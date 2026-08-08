@@ -18,8 +18,13 @@ public sealed class WhisperEngine : ISttEngine
 
     public bool LoadModel(string modelPath)
     {
+        DebugRecorder.Log("INF", $"Loading Whisper model: {modelPath} ({new FileInfo(modelPath).Length / 1e6:F0}MB)");
         if (_ctx != IntPtr.Zero) { Native.whisper_free(_ctx); _ctx = IntPtr.Zero; }
         _ctx = Native.whisper_init_from_file(modelPath);
+        if (_ctx != IntPtr.Zero)
+            DebugRecorder.Log("INF", $"Whisper loaded. Threads={Math.Max(2, Environment.ProcessorCount / 2)}, CPU={Environment.ProcessorCount} cores");
+        else
+            DebugRecorder.Error("INF", "whisper_init_from_file", new Exception($"Failed to init whisper.cpp with {modelPath}"));
         return _ctx != IntPtr.Zero;
     }
 
@@ -35,7 +40,9 @@ public sealed class WhisperEngine : ISttEngine
         p.suppress_blank = 1;
         p.language = Marshal.StringToHGlobalAnsi("en");
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         Native.whisper_full(_ctx, p, audio, audio.Length);
+        sw.Stop();
         Marshal.FreeHGlobal(p.language);
 
         int n = Native.whisper_full_n_segments(_ctx);
@@ -45,7 +52,10 @@ public sealed class WhisperEngine : ISttEngine
             IntPtr ptr = Native.whisper_full_get_segment_text(_ctx, i);
             if (ptr != IntPtr.Zero) sb.Append(Marshal.PtrToStringAnsi(ptr));
         }
-        return sb.ToString().Trim();
+        var text = sb.ToString().Trim();
+        var rtf = audio.Length > 0 ? sw.ElapsedMilliseconds / (audio.Length / 16000.0) / 1000.0 : 0;
+        DebugRecorder.Log("INF", $"Whisper inference {sw.ElapsedMilliseconds}ms for {audio.Length / 16000.0:F1}s audio (RTF {rtf:F2}x), segments={n}, text=\"{text}\"");
+        return text;
     }
 
     public string TranscribePartial(float[] audio) => Transcribe(audio);

@@ -45,6 +45,7 @@ public sealed class ParakeetEngine : ISttEngine
 
     public bool LoadModel(string modelPath)
     {
+        DebugRecorder.Log("INF", $"Loading Parakeet model: {modelPath} ({new FileInfo(modelPath).Length / 1e6:F0}MB)");
         try
         {
             // Try DirectML (GPU) first — works on AMD Radeon/NVIDIA/Intel
@@ -56,9 +57,11 @@ public sealed class ParakeetEngine : ISttEngine
             _session = new InferenceSession(modelPath, dmlOptions);
             ReadModelMetadata();
             AutoLoadSiblingVocab(modelPath);
+            LogModelMetadata();
+            DebugRecorder.Log("INF", "Parakeet model loaded (DirectML GPU)");
             return true;
         }
-        catch
+        catch (Exception dmlEx)
         {
             // Fallback to CPU
             try
@@ -66,14 +69,27 @@ public sealed class ParakeetEngine : ISttEngine
                 _session = new InferenceSession(modelPath);
                 ReadModelMetadata();
                 AutoLoadSiblingVocab(modelPath);
+                LogModelMetadata();
+                DebugRecorder.Log("INF", $"Parakeet model loaded (CPU fallback — DML failed: {dmlEx.Message})");
                 return true;
             }
-            catch
+            catch (Exception cpuEx)
             {
+                DebugRecorder.Error("INF", "LoadModel", cpuEx);
                 _session = null;
                 return false;
             }
         }
+    }
+
+    private void LogModelMetadata()
+    {
+        if (_session == null) return;
+        foreach (var kv in _session.InputMetadata)
+            DebugRecorder.Log("INF", $"Model input: '{kv.Key}' type={kv.Value.ElementType} dims=[{string.Join(",", kv.Value.Dimensions)}]");
+        foreach (var kv in _session.OutputMetadata)
+            DebugRecorder.Log("INF", $"Model output: '{kv.Key}' type={kv.Value.ElementType} dims=[{string.Join(",", kv.Value.Dimensions)}]");
+        DebugRecorder.Log("DEC", $"Vocab loaded: {_vocab != null}, size={_vocab?.Length ?? 0}");
     }
 
     /// <summary>Look for vocab.txt next to the model file and load it (case-insensitive).</summary>
@@ -140,7 +156,10 @@ public sealed class ParakeetEngine : ISttEngine
             inputs["length"] = lenTensor;
         }
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        DebugRecorder.Log("INF", $"Run: '{_inputName}'=[1,{melBins},{frames}]" + (_hasLengthInput ? $" length={inputs["length"]}" : "") + $" → outputs=[{string.Join(",", _outputNames)}]");
         using var results = _session.Run(_runOptions, inputs, _outputNames);
+        sw.Stop();
         lenTensor?.Dispose();
 
         // Assume first output is logits; get argmax per timestep → tokens
@@ -150,6 +169,7 @@ public sealed class ParakeetEngine : ISttEngine
         // [1, T, vocab] typical for CTC models
         long T = shape.Length >= 2 ? shape[^2] : 1;
         long V = shape.Length >= 1 ? shape[^1] : 1;
+        DebugRecorder.Log("INF", $"Inference done in {sw.ElapsedMilliseconds}ms. Output shape=[{string.Join(",", shape)}]");
 
         var logits = output.GetTensorDataAsSpan<float>();
         var tokens = new List<int>();
@@ -165,17 +185,20 @@ public sealed class ParakeetEngine : ISttEngine
             tokens.Add(best);
         }
 
-        // Strip blanks (blank token = V-1 or 0 for CTC) and collapse repeats
+        // Strip blanks (blank = V-1 = 1024 for this model) and collapse repeats
         int blank = (int)V - 1;
         var collapsed = new List<int>();
         int prev = -1;
+        int blankCount = 0;
         foreach (var t in tokens)
         {
-            if (t != blank && t != prev) collapsed.Add(t);
+            if (t == blank) { blankCount++; continue; }
+            if (t != prev) collapsed.Add(t);
             prev = t;
         }
+        DebugRecorder.Log("DEC", $"Raw frames={tokens.Count} | blank={blankCount} | collapsed tokens={collapsed.Count} | first tokens=[{string.Join(",", collapsed.Take(10))}]");
 
-        // Decode via BPE/WordPiece vocab (simplified: use vocab file if bundled)
+        // Decode via BPE/WordPiece vocab
         return DecodeTokens(collapsed);
     }
 
@@ -205,7 +228,9 @@ public sealed class ParakeetEngine : ISttEngine
         // SentencePiece space marker → real space
         result = result.Replace("\u2581", " ");
         result = System.Text.RegularExpressions.Regex.Replace(result, @"\s+", " ");
-        return result.Trim();
+        var trimmed = result.Trim();
+        DebugRecorder.Log("DEC", $"Decoded raw: \"{trimmed}\"");
+        return trimmed;
     }
 
     private string[]? _vocab;

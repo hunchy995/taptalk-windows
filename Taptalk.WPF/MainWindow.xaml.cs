@@ -55,6 +55,12 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
     {
+        // Wire DebugRecorder → LogBox (thread-safe via dispatcher)
+        Taptalk.Core.DebugRecorder.Instance.OnLogAdded += AppendDebugLine;
+        Taptalk.Core.DebugRecorder.Instance.IsVerboseEnabled = DebugChk.IsChecked.GetValueOrDefault(true);
+        Log("🔍 Debug mode " + (Taptalk.Core.DebugRecorder.Instance.IsVerboseEnabled ? "ON" : "OFF") +
+            " — full log also at " + Taptalk.Core.DebugRecorder.Instance.LogFilePath);
+
         // 1. Populate microphones with a "System Default" option (index -1 = WAVE_MAPPER)
         var devices = new List<MicDevice>
         {
@@ -207,6 +213,7 @@ public partial class MainWindow : Window
 
         if (_vad.Check(_capture.GetSnapshot(), (int)_sessionTimer.ElapsedMilliseconds))
         {
+            DebugRecorder.Log("VAD", $"Silence limit reached at {_sessionTimer.ElapsedMilliseconds}ms — auto-stop");
             // Marshal the stop back to the UI thread — NEVER stop NAudio from its own callback
             Dispatcher.BeginInvoke(new Action(() =>
             {
@@ -267,6 +274,7 @@ public partial class MainWindow : Window
         _state = RecordingState.Transcribing;
         _lastPartialText = "";
         StopPartialTimer();
+        DebugRecorder.Log("REC", "State → Transcribing");
 
         try
         {
@@ -287,6 +295,7 @@ public partial class MainWindow : Window
                 Log($"⏱️ Inference: {sw.ElapsedMilliseconds}ms (RTF {rtf:F2}x)");
 
                 var cleaned = TextPostProcessor.Clean(raw);
+                DebugRecorder.Log("POST", $"Raw=\"{raw}\" → Cleaned=\"{cleaned}\"");
                 Log($"📝 \"{cleaned}\"");
 
                 if (!string.IsNullOrWhiteSpace(cleaned))
@@ -315,6 +324,49 @@ public partial class MainWindow : Window
 
     private void Log(string msg) =>
         Dispatcher.Invoke(() => LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}\n"));
+
+    /// <summary>Called from DebugRecorder (any thread) — marshals to UI, filters verbose tags, caps length.</summary>
+    private void AppendDebugLine(string line)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action<string>(AppendDebugLine), line);
+            return;
+        }
+
+        // Filter verbose tags when debug checkbox is off
+        if (!DebugChk.IsChecked.GetValueOrDefault(true))
+        {
+            if (line.Contains("[AUDIO]") || line.Contains("[FEAT]") ||
+                line.Contains("[INF]") || line.Contains("[DEC]"))
+                return;
+        }
+
+        LogBox.AppendText(line + "\n");
+
+        // Cap the LogBox to the last ~1000 lines to avoid unbounded growth
+        if (LogBox.LineCount > 1000)
+        {
+            int firstBreak = LogBox.Text.IndexOf('\n');
+            if (firstBreak >= 0)
+                LogBox.Text = LogBox.Text.Substring(firstBreak + 1);
+        }
+        LogBox.ScrollToEnd();
+    }
+
+    private void DebugChk_Changed(object sender, RoutedEventArgs e)
+    {
+        if (DebugChk == null) return;
+        bool on = DebugChk.IsChecked.GetValueOrDefault(true);
+        Taptalk.Core.DebugRecorder.Instance.IsVerboseEnabled = on;
+        Log("🔍 Debug mode " + (on ? "ON" : "OFF"));
+    }
+
+    private void ClearLogBtn_Click(object sender, RoutedEventArgs e)
+    {
+        LogBox.Clear();
+        Log("Log cleared — full history is in " + Taptalk.Core.DebugRecorder.Instance.LogFilePath);
+    }
 
     // ---------- Settings UI handlers (unchanged) ----------
 

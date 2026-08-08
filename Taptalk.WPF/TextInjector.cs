@@ -35,14 +35,45 @@ public static class TextInjector
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
     public static async Task InjectTextAsync(string text)
     {
-        if (string.IsNullOrEmpty(text)) return;
+        if (string.IsNullOrEmpty(text))
+        {
+            Taptalk.Core.DebugRecorder.Log("INJ", "Text empty — skipping injection");
+            return;
+        }
+
+        // Capture the foreground window title for diagnostics
+        string target = "Unknown";
+        try
+        {
+            var hwnd = GetForegroundWindow();
+            if (hwnd != IntPtr.Zero)
+            {
+                var sb = new System.Text.StringBuilder(256);
+                if (GetWindowText(hwnd, sb, 256) > 0) target = sb.ToString();
+            }
+        }
+        catch { }
 
         if (text.Length < 30)
+        {
+            Taptalk.Core.DebugRecorder.Log("INJ", $"SendInput → '{target}' | chars={text.Length} | text=\"{text}\"");
             SendUnicodeKeys(text);
+            Taptalk.Core.DebugRecorder.Log("INJ", "SendInput complete");
+        }
         else
+        {
+            Taptalk.Core.DebugRecorder.Log("INJ", $"Clipboard+Ctrl+V → '{target}' | chars={text.Length} | text=\"{text}\"");
             await InjectViaClipboardAsync(text);
+            Taptalk.Core.DebugRecorder.Log("INJ", "Clipboard injection complete");
+        }
     }
 
     private static void SendUnicodeKeys(string text)

@@ -69,6 +69,7 @@ public sealed class MelScaleFeaturizer
     public float[,] Extract(float[] pcm)
     {
         int numFrames = Math.Max(0, (pcm.Length - WindowSize) / HopSize + 1);
+        Taptalk.Core.DebugRecorder.Log("FEAT", $"Extract: {pcm.Length} samples ({pcm.Length / (float)SampleRate:F2}s) → frames={numFrames}");
         var features = new float[MelBins, numFrames];
 
         var real = new float[FftSize];
