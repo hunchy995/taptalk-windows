@@ -57,30 +57,43 @@ public sealed class DebugRecorder : IDisposable
         catch { }
 
         _fileWriterTask = Task.Run(ProcessFileQueueAsync);
-        Log("SYS", $"Debugger initialized. Log file: {_logFilePath}");
+
+        // 🔴 Do NOT call static Log() here — it accesses Instance, which re-enters the
+        // Lazy<T> while the constructor is still running → InvalidOperationException
+        // ("ValueFactory attempted to access the Value property of this instance").
+        // This crashed the app at startup when DebugChk.IsChecked fired DebugChk_Changed.
+        AppendLine(Format("SYS", $"Debugger initialized. Log file: {_logFilePath}"));
+    }
+
+    private static string Format(string tag, string message)
+    {
+        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+        var threadId = Environment.CurrentManagedThreadId;
+        return $"[{timestamp}][T{threadId:00}][{tag}] {message}";
+    }
+
+    /// <summary>Core append — used by static Log() and by the constructor (no Instance access).</summary>
+    private void AppendLine(string line)
+    {
+        lock (_lock)
+        {
+            _memoryLog.Add(line);
+            if (_memoryLog.Count > MaxMemoryLines)
+                _memoryLog.RemoveAt(0);
+        }
+
+        _fileQueue.Enqueue(line);
+        _enqueueEvent.Set();
+
+        try { OnLogAdded?.Invoke(line); }
+        catch { }
     }
 
     /// <summary>Log a message with a stage tag. Thread-safe; never blocks the caller.</summary>
     public static void Log(string tag, string message)
     {
         var instance = Instance;
-        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
-        var threadId = Environment.CurrentManagedThreadId;
-        var line = $"[{timestamp}][T{threadId:00}][{tag}] {message}";
-
-        lock (instance._lock)
-        {
-            instance._memoryLog.Add(line);
-            if (instance._memoryLog.Count > MaxMemoryLines)
-                instance._memoryLog.RemoveAt(0);
-        }
-
-        instance._fileQueue.Enqueue(line);
-        instance._enqueueEvent.Set();
-
-        // Notify UI listeners (they must marshal to the UI thread themselves)
-        try { instance.OnLogAdded?.Invoke(line); }
-        catch { }
+        instance.AppendLine(Format(tag, message));
     }
 
     /// <summary>Log an exception with full stack trace at a stage.</summary>
