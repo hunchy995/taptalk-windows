@@ -322,8 +322,11 @@ public partial class MainWindow : Window
         _sessionTimer.Reset();
     }
 
-    private void Log(string msg) =>
+    private void Log(string msg)
+    {
+        if (LogBox == null) return; // may fire during InitializeComponent before LogBox exists
         Dispatcher.Invoke(() => LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}\n"));
+    }
 
     /// <summary>Called from DebugRecorder (any thread) — marshals to UI, filters verbose tags, caps length.</summary>
     private void AppendDebugLine(string line)
@@ -333,6 +336,8 @@ public partial class MainWindow : Window
             Dispatcher.BeginInvoke(new Action<string>(AppendDebugLine), line);
             return;
         }
+
+        if (LogBox == null) return; // during InitializeComponent, LogBox not built yet
 
         // Filter verbose tags when debug checkbox is off
         if (!DebugChk.IsChecked.GetValueOrDefault(true))
