@@ -4,7 +4,8 @@ using System.Windows.Interop;
 namespace Taptalk.WPF;
 
 /// <summary>
-/// Global hotkey: Alt+Space push-to-talk toggle.
+/// Global hotkey: Ctrl+Shift+Space push-to-talk toggle.
+/// (Alt+Space was avoided — Windows reserves it for the system menu.)
 /// </summary>
 public sealed class HotKeyManager : IDisposable
 {
@@ -14,7 +15,8 @@ public sealed class HotKeyManager : IDisposable
     [DllImport("user32.dll")]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-    private const uint MOD_ALT = 0x0001;
+    private const uint MOD_CONTROL = 0x0002;
+    private const uint MOD_SHIFT = 0x0004;
     private const uint VK_SPACE = 0x0020;
     private const int HOTKEY_ID = 0xCAFE;
     private const int WM_HOTKEY = 0x0312;
@@ -29,7 +31,7 @@ public sealed class HotKeyManager : IDisposable
         _hwnd = handle;
         _source = HwndSource.FromHwnd(handle);
         _source?.AddHook(WndProc);
-        RegisterHotKey(handle, HOTKEY_ID, MOD_ALT, VK_SPACE);
+        RegisterHotKey(handle, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_SPACE);
     }
 
     public void Unregister()

@@ -9,6 +9,20 @@ using Taptalk.Engine.Whisper;
 
 namespace Taptalk.WPF;
 
+public enum RecordingState
+{
+    Idle,
+    Recording,
+    Transcribing
+}
+
+public class MicDevice
+{
+    public int Index { get; set; }
+    public string Name { get; set; } = "";
+    public override string ToString() => Name;
+}
+
 public partial class MainWindow : Window
 {
     private readonly AudioCapture _capture = new();
@@ -17,11 +31,19 @@ public partial class MainWindow : Window
     private HotKeyManager? _hotKey;
     private OverlayWindow? _overlay;
     private System.Windows.Forms.NotifyIcon? _tray;
-    private CancellationTokenSource? _cts;
-    private bool _isTranscribing;
-    private bool _recordingRequested; // OUR intent — device may stop itself (mic perms), we still know user asked
-    private bool _autoStop = true;    // cached on UI thread; read from audio thread safely
+
+    private RecordingState _state = RecordingState.Idle;
+    private readonly object _stateLock = new();
+
+    private bool _autoStop = true;
     private readonly Stopwatch _sessionTimer = new();
+    private bool _isPartialTranscribing;
+    private bool _warnedNoAudio;
+    private DateTime _lastTapTime = DateTime.MinValue;
+
+    private DateTime _lastPartial = DateTime.MinValue;
+    private string _lastPartialText = "";
+    private System.Windows.Threading.DispatcherTimer? _partialTimer;
 
     public MainWindow()
     {
@@ -33,36 +55,50 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
     {
-        // Microphone list (0 = Windows default)
-        var mics = AudioCapture.EnumerateDevices();
-        MicCombo.ItemsSource = mics;
-        MicCombo.SelectedIndex = 0;
-        Log($"🎤 {mics.Count} microphone(s) found — using default");
+        // 1. Populate microphones with a "System Default" option (index -1 = WAVE_MAPPER)
+        var devices = new List<MicDevice>
+        {
+            new() { Index = -1, Name = "System Default Microphone" }
+        };
+        var hardwareMics = AudioCapture.EnumerateDevices();
+        for (int i = 0; i < hardwareMics.Count; i++)
+        {
+            devices.Add(new MicDevice { Index = i, Name = hardwareMics[i] });
+        }
 
-        // Surface mic device failures with privacy guidance
+        MicCombo.ItemsSource = devices;
+        MicCombo.SelectedIndex = 0; // Default to Windows Default Mic
+        _capture.DeviceNumber = -1;
+
+        MicCombo.SelectionChanged += OnMicSelectionChanged;
+
+        // 2. Surface mic device failures safely on the UI thread
         _capture.OnError += msg =>
         {
-            Log($"❌ Microphone error: {msg}");
-            Dispatcher.Invoke(() => MicStatusText.Text =
-                "Microphone is blocked. Windows needs permission to use your mic.\nClick 'Mic Privacy' and allow Taptalk, then restart recording.");
+            Dispatcher.BeginInvoke(() =>
+            {
+                Log($"❌ Microphone error: {msg}");
+                MicStatusText.Text = "Microphone error. Please check your Windows default microphone settings.";
+                ResetToIdleState();
+            });
         };
 
-        // Overlay
+        // 3. Overlay window
         _overlay = new OverlayWindow();
         _overlay.OnTap += OnMicTap;
         _overlay.OnDragEnd += () => { };
         _overlay.Show();
 
-        // Hotkey Alt+Space
+        // 4. Global hotkey — Ctrl+Shift+Space (Alt+Space conflicts with the Windows system menu)
         _hotKey = new HotKeyManager();
         _hotKey.OnHotKeyPressed += OnMicTap;
         _hotKey.Register(new System.Windows.Interop.WindowInteropHelper(this).Handle);
 
-        // Tray icon
+        // 5. Tray icon
         _tray = new System.Windows.Forms.NotifyIcon
         {
             Icon = System.Drawing.SystemIcons.Application,
-            Text = "Taptalk — Alt+Space to record",
+            Text = "Taptalk — Ctrl+Shift+Space to record",
             Visible = true
         };
         _tray.DoubleClick += (_, _) => { Show(); WindowState = WindowState.Normal; Activate(); };
@@ -71,73 +107,118 @@ public partial class MainWindow : Window
         menu.Items.Add("Exit", null, (_, _) => Close());
         _tray.ContextMenuStrip = menu;
 
+        // 6. Audio chunks arrive on the NAudio thread — only do VAD math here, never touch UI
         _capture.OnChunk += Chunk => CheckVad(Chunk);
 
-        Log("Taptalk ready. Alt+Space or tap the mic to record.");
+        Log("Taptalk ready. Press Ctrl+Shift+Space or tap the overlay mic to record.");
+    }
+
+    private void OnMicSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (MicCombo.SelectedItem is MicDevice selected)
+        {
+            _capture.DeviceNumber = selected.Index;
+            Log($"🎤 Microphone input selected: {selected.Name}");
+            MicStatusText.Text = "";
+        }
     }
 
     private void OnMicTap()
     {
-        // Ignore taps while transcribing — prevents "click again starts a new recording"
-        if (_isTranscribing) return;
-
-        if (_engine == null || !_engine.IsLoaded)
+        // Enforce UI-thread execution (hotkey WM_HOTKEY arrives on the UI thread already, but be safe)
+        if (!Dispatcher.CheckAccess())
         {
-            Log("⚠️ No model loaded — click Browse and select a model file first.");
-            Show();
-            Activate();
+            Dispatcher.BeginInvoke(new Action(OnMicTap));
             return;
         }
 
-        if (_recordingRequested || _capture.IsRecording)
-            _ = StopAndTranscribeAsync();
-        else
-            StartRecording();
+        // Debounce keyboard auto-repeat / double-fire (Windows typematic repeat fires WM_HOTKEY repeatedly)
+        var now = DateTime.UtcNow;
+        if ((now - _lastTapTime).TotalMilliseconds < 500)
+            return;
+        _lastTapTime = now;
+
+        lock (_stateLock)
+        {
+            if (_state == RecordingState.Transcribing)
+                return; // ignore inputs during transcription
+
+            if (_engine == null || !_engine.IsLoaded)
+            {
+                Log("⚠️ No model loaded — click Browse and select a model file first.");
+                Show();
+                Activate();
+                return;
+            }
+
+            if (_state == RecordingState.Recording)
+            {
+                // Reject stop within 500ms of recording start (typematic auto-repeat protection)
+                if (_sessionTimer.ElapsedMilliseconds < 500)
+                    return;
+                _ = StopAndTranscribeAsync();
+            }
+            else if (_state == RecordingState.Idle)
+            {
+                StartRecording();
+            }
+        }
     }
 
     private void StartRecording()
     {
-        _recordingRequested = true;
+        _state = RecordingState.Recording;
         _warnedNoAudio = false;
-        _cts = new CancellationTokenSource();
         _vad.Reset();
         _sessionTimer.Restart();
-        _capture.Start();
-        _overlay?.SetRecording();
-        StartPartialTimer();
-        Log($"🎤 Recording started ({DateTime.Now:HH:mm:ss})");
-    }
 
-    private DateTime _lastPartial = DateTime.MinValue;
-    private string _lastPartialText = "";
-    private System.Windows.Threading.DispatcherTimer? _partialTimer;
-    private bool _warnedNoAudio;
+        try
+        {
+            _capture.Start();
+            _overlay?.SetRecording();
+            StartPartialTimer();
+            Log($"🎤 Recording started ({DateTime.Now:HH:mm:ss})");
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Failed to start recording: {ex.Message}");
+            ResetToIdleState();
+        }
+    }
 
     private void CheckVad(float[] chunk)
     {
-        if (!_capture.IsRecording || _engine == null) return;
+        // Called on the NAudio thread — NO UI access here. Pure math only.
+        if (_state != RecordingState.Recording) return;
 
-        // If we've been recording >2.5s and got almost no audio, the mic is blocked
+        // Watchdog: recording but almost no audio for 2.5s → likely muted/blocked mic
         if (!_warnedNoAudio && _sessionTimer.ElapsedMilliseconds > 2500 && _capture.TotalSamples < 4000)
         {
             _warnedNoAudio = true;
             Dispatcher.BeginInvoke(() =>
             {
-                Log("⚠️ No audio detected — Windows may be blocking the microphone.");
-                MicStatusText.Text =
-                    "No audio is reaching Taptalk. Click 'Mic Privacy' and allow microphone access, then try again.";
+                Log("⚠️ No audio detected — check your physical microphone mute button.");
+                MicStatusText.Text = "No audio data is reaching Taptalk. Verify your mic input levels.";
             });
         }
 
         if (!_autoStop) return;
-
-        // Don't auto-stop in first 1.5s
         if (_sessionTimer.ElapsedMilliseconds < 1500) return;
 
         if (_vad.Check(_capture.GetSnapshot(), (int)_sessionTimer.ElapsedMilliseconds))
         {
-            Log("🔇 Silence detected — auto-stop");
-            _ = StopAndTranscribeAsync();
+            // Marshal the stop back to the UI thread — NEVER stop NAudio from its own callback
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                lock (_stateLock)
+                {
+                    if (_state == RecordingState.Recording)
+                    {
+                        Log("🔇 Silence detected — auto-stop");
+                        _ = StopAndTranscribeAsync();
+                    }
+                }
+            }));
         }
     }
 
@@ -150,12 +231,14 @@ public partial class MainWindow : Window
         };
         _partialTimer.Tick += async (_, _) =>
         {
-            if (!_capture.IsRecording || _engine == null) return;
+            if (_state != RecordingState.Recording || _engine == null || _isPartialTranscribing) return;
+
             var audio = _capture.GetSnapshot();
             if (audio.Length < _engine.MinSamplesForPartial) return;
+
+            _isPartialTranscribing = true;
             try
             {
-                // Runs on UI thread — never blocks the NAudio callback thread
                 var partial = await Task.Run(() => _engine!.TranscribePartial(audio));
                 var cleaned = TextPostProcessor.Clean(partial);
                 if (!string.IsNullOrWhiteSpace(cleaned) && cleaned != _lastPartialText)
@@ -164,7 +247,11 @@ public partial class MainWindow : Window
                     Log($"🎙️ {cleaned}");
                 }
             }
-            catch { /* partial transcription is best-effort */ }
+            catch { }
+            finally
+            {
+                _isPartialTranscribing = false;
+            }
         };
         _partialTimer.Start();
     }
@@ -177,10 +264,10 @@ public partial class MainWindow : Window
 
     private async Task StopAndTranscribeAsync()
     {
-        _isTranscribing = true;
-        _recordingRequested = false;
+        _state = RecordingState.Transcribing;
         _lastPartialText = "";
         StopPartialTimer();
+
         try
         {
             _capture.Stop();
@@ -210,25 +297,29 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
-                Log($"❌ Error: {ex.Message}");
-            }
-            finally
-            {
-                _overlay?.SetIdle();
+                Log($"❌ Processing Error: {ex.Message}");
             }
         }
         finally
         {
-            _isTranscribing = false;
+            ResetToIdleState();
         }
+    }
+
+    private void ResetToIdleState()
+    {
+        _state = RecordingState.Idle;
+        _overlay?.SetIdle();
+        _sessionTimer.Reset();
     }
 
     private void Log(string msg) =>
         Dispatcher.Invoke(() => LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}\n"));
 
+    // ---------- Settings UI handlers (unchanged) ----------
+
     private void EngineCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
-        // Reload engine if a model is already selected
         if (IsLoaded && ModelPathBox.Text.Length > 0 && File.Exists(ModelPathBox.Text))
             LoadEngine();
     }
@@ -299,27 +390,8 @@ public partial class MainWindow : Window
         _autoStop = AutoStopChk.IsChecked.GetValueOrDefault(true);
     }
 
-    private void MicCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
-    {
-        if (MicCombo.SelectedIndex < 0) return;
-        _capture.DeviceIndex = MicCombo.SelectedIndex;
-        // If we're mid-recording, restart with the new device
-        if (_recordingRequested || _capture.IsRecording)
-        {
-            Log($"🎤 Switching to: {MicCombo.SelectedItem} — restarting capture");
-            _capture.Stop();
-            _capture.Start();
-        }
-        else
-        {
-            Log($"🎤 Microphone: {MicCombo.SelectedItem}");
-        }
-        MicStatusText.Text = "";
-    }
-
     private void MicSettingsBtn_Click(object sender, RoutedEventArgs e)
     {
-        // Open Windows 10/11 microphone privacy settings
         try
         {
             System.Diagnostics.Process.Start(new ProcessStartInfo("ms-settings:privacy-microphone") { UseShellExecute = true });
@@ -337,10 +409,10 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        _hotKey?.Unregister();
+        _tray?.Dispose();
         _capture.Dispose();
         _engine?.Dispose();
-        _hotKey?.Dispose();
-        _tray?.Dispose();
         _overlay?.Close();
     }
 }

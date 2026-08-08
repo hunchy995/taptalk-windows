@@ -62,11 +62,12 @@ Download any GGML model: https://huggingface.co/ggerganov/whisper.cpp/tree/main
 
 ## Usage
 
-- **Alt+Space** — start/stop recording (push-to-talk)
+- **Ctrl+Shift+Space** — start/stop recording (push-to-talk)
 - **Tap the floating mic button** — same
 - Hold the button and drag to move it
 - Auto-stop on silence (toggleable)
 - Text is injected into whatever window has focus
+- **Microphone:** pick any input device in Settings (default = Windows default mic); use **🔧 Mic Privacy** if Windows blocks access
 
 ## Project structure
 

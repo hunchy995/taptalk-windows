@@ -15,16 +15,16 @@ public sealed class AudioCapture : IDisposable
     private readonly object _lock = new();
     private int _generation; // incremented each Start; stale RecordingStopped events ignored
 
-    public event Action<float[]>? OnChunk; // raised every ~250ms with new PCM
+    public event Action<float[]>? OnChunk; // raised every ~100ms with new PCM
     public event Action<string>? OnError;  // raised when the capture device fails
 
-    /// <summary>0 = Windows default input device.</summary>
-    public int DeviceIndex { get; set; }
+    /// <summary>-1 = Windows default recording device (WAVE_MAPPER).</summary>
+    public int DeviceNumber { get; set; } = -1;
 
     public bool IsRecording { get; private set; }
     public int TotalSamples { get { lock (_lock) return _pcmSamples.Count; } }
 
-    /// <summary>Enumerate available input devices (0 = default).</summary>
+    /// <summary>Enumerate available input devices (0 = first hardware device).</summary>
     public static List<string> EnumerateDevices()
     {
         var names = new List<string>();
@@ -38,7 +38,6 @@ public sealed class AudioCapture : IDisposable
             }
         }
         catch { /* no devices / enumeration failed */ }
-        if (names.Count == 0) names.Add("Default Microphone");
         return names;
     }
 
@@ -50,9 +49,9 @@ public sealed class AudioCapture : IDisposable
         var gen = ++_generation;
         var waveIn = new WaveInEvent
         {
-            DeviceNumber = DeviceIndex,
+            DeviceNumber = DeviceNumber,
             WaveFormat = new WaveFormat(SampleRate, 16, 1),
-            BufferMilliseconds = 250
+            BufferMilliseconds = 100 // lower latency chunks for agile VAD response
         };
         waveIn.DataAvailable += OnDataAvailable;
         waveIn.RecordingStopped += (_, args) =>
@@ -72,15 +71,24 @@ public sealed class AudioCapture : IDisposable
 
     public void Stop()
     {
+        IsRecording = false;
         var w = _waveIn;
         _waveIn = null;
-        w?.StopRecording();
-        w?.Dispose();
-        IsRecording = false;
+        if (w != null)
+        {
+            try
+            {
+                w.StopRecording();
+                w.Dispose();
+            }
+            catch { }
+        }
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
+        if (!IsRecording) return;
+
         var samples = new float[e.BytesRecorded / 2];
         for (int i = 0; i < samples.Length; i++)
         {
