@@ -16,6 +16,11 @@ public sealed class WhisperEngine : ISttEngine
 
     private IntPtr _ctx;
 
+    /// <summary>whisper_full on the same context is NOT thread-safe — serialize all calls
+    /// (partial timer + full transcription must never run concurrently → native crash).</summary>
+    private readonly SemaphoreSlim _runGate = new(1, 1);
+    private bool _isDisposed;
+
     public bool LoadModel(string modelPath)
     {
         DebugRecorder.Log("INF", $"Loading Whisper model: {modelPath} ({new FileInfo(modelPath).Length / 1e6:F0}MB)");
@@ -29,6 +34,22 @@ public sealed class WhisperEngine : ISttEngine
     }
 
     public string Transcribe(float[] audio)
+    {
+        if (_ctx == IntPtr.Zero || audio.Length == 0) return "";
+        if (_isDisposed) throw new ObjectDisposedException(nameof(WhisperEngine));
+
+        _runGate.Wait();
+        try
+        {
+            return TranscribeCore(audio);
+        }
+        finally
+        {
+            _runGate.Release();
+        }
+    }
+
+    private string TranscribeCore(float[] audio)
     {
         if (_ctx == IntPtr.Zero || audio.Length == 0) return "";
 
@@ -62,7 +83,20 @@ public sealed class WhisperEngine : ISttEngine
 
     public void Dispose()
     {
-        if (_ctx != IntPtr.Zero) { Native.whisper_free(_ctx); _ctx = IntPtr.Zero; }
+        if (_isDisposed) return;
+        _isDisposed = true;
+
+        // Never free the whisper context mid-inference (native use-after-free crash)
+        _runGate.Wait();
+        try
+        {
+            if (_ctx != IntPtr.Zero) { Native.whisper_free(_ctx); _ctx = IntPtr.Zero; }
+        }
+        finally
+        {
+            _runGate.Release();
+            _runGate.Dispose();
+        }
     }
 
     private enum SamplingStrategy { WhisperSamplingGreedy = 0 }

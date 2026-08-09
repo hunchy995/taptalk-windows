@@ -1,3 +1,17 @@
+
+## 2026-08-09 — CRASH FIX: concurrent ONNX/DirectML Run() → native 0xC0000005 (research-backed)
+
+**Symptom (5th report, user furious):** after stopping recording the icon turns blue (processing) and the app COMPLETELY crashes — every time, no dialog. Four prior updates failed to fix it.
+
+**Root cause (3 parallel deep-research subagents + coding-partner review):** the 1.5s partial-transcription DispatcherTimer and StopAndTranscribeAsync BOTH call `_engine.Transcribe()` via Task.Run → concurrent `_session.Run()` on the same DirectML InferenceSession. ORT's DirectML EP is NOT safe for concurrent Run() (especially with variable input shapes that force DML shader recompilation, making partials take 1-3s → a partial is almost always mid-flight at stop). Result: native access violation (0xC0000005) in dml/onnxruntime.dll — silent process death, uncatchable by managed try/catch.
+
+**Fixes applied:**
+1. **SemaphoreSlim _runGate (1,1) in BOTH engines** — serializes ALL Run() calls (partial + full + Dispose). Blocking Wait() is fine (on Task.Run threads).
+2. **GetTensorDataAsSpan → .ToArray()** — copy logits to managed array inside the using block (span dangles after results dispose = #1 C# ORT crash class).
+3. **DML SessionOptions stabilizers:** `ExecutionMode.ORT_SEQUENTIAL` + `EnableMemoryPattern=false`.
+4. **Gated Dispose()** — never dispose session/context mid-Run (use-after-free).
+5. **App.xaml.cs full safety net:** AppDomain.UnhandledException + TaskScheduler.UnobservedTaskException + DispatcherUnhandledException → all log to %LOCALAPPDATA%\Taptalk\Logs\crash.log; only CLIPBRD_E_CANT_OPEN is swallowed (Handled=true).
+6. **CheckVad wrapped in try/catch** (NAudio DataAvailable can fire after Stop — never let it escape the wave thread).
 # Taptalk — Development Log
 
 Chronological record of fixes. Latest first. Companion to the `taptalk-windows` skill.

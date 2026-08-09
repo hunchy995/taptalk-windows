@@ -195,6 +195,20 @@ public partial class MainWindow : Window
     private void CheckVad(float[] chunk)
     {
         // Called on the NAudio thread — NO UI access here. Pure math only.
+        try
+        {
+            CheckVadCore(chunk);
+        }
+        catch (Exception ex)
+        {
+            // A stale DataAvailable callback after Stop/Dispose is a documented NAudio
+            // hazard — NEVER let an exception escape the wave thread (fatal, no hook).
+            DebugRecorder.Log("ERR", $"CheckVad: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void CheckVadCore(float[] chunk)
+    {
         if (_state != RecordingState.Recording) return;
 
         // Watchdog: recording but almost no audio for 2.5s → likely muted/blocked mic

@@ -24,6 +24,15 @@ public sealed class ParakeetEngine : ISttEngine
     private string _inputName = "input";
     private bool _hasLengthInput;
 
+    /// <summary>
+    /// Serializes ALL session.Run() calls. The DirectML EP is NOT reliably safe for
+    /// concurrent Run() calls (partial transcription timer + full transcription at stop
+    /// can overlap → native 0xC0000005 access violation in dml/onnxruntime.dll, silent
+    /// process death). This gate is the single sync point protecting the session.
+    /// </summary>
+    private readonly SemaphoreSlim _runGate = new(1, 1);
+    private bool _isDisposed;
+
     public ParakeetEngine(string modelPath) => _modelPath = modelPath;
 
     private void ReadModelMetadata()
@@ -51,7 +60,12 @@ public sealed class ParakeetEngine : ISttEngine
             // Try DirectML (GPU) first — works on AMD Radeon/NVIDIA/Intel
             var dmlOptions = new SessionOptions
             {
-                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                // DML EP stabilizers (coding-partner + research): sequential execution
+                // avoids internal DML concurrency bugs; disabling the memory pattern
+                // optimizer avoids AVs when input shapes fluctuate under DirectML.
+                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
+                EnableMemoryPattern = false
             };
             dmlOptions.AppendExecutionProvider_DML(0);
             _session = new InferenceSession(modelPath, dmlOptions);
@@ -133,6 +147,23 @@ public sealed class ParakeetEngine : ISttEngine
 
     private string RunInference(float[,] features)
     {
+        if (_isDisposed) throw new ObjectDisposedException(nameof(ParakeetEngine));
+
+        // SERIALIZE: partial + full transcriptions must NEVER hit the DML session
+        // concurrently (native crash class). Blocking is fine — we're on a Task.Run thread.
+        _runGate.Wait();
+        try
+        {
+            return RunInferenceCore(features);
+        }
+        finally
+        {
+            _runGate.Release();
+        }
+    }
+
+    private string RunInferenceCore(float[,] features)
+    {
         int melBins = features.GetLength(0);
         int frames = features.GetLength(1);
 
@@ -171,7 +202,7 @@ public sealed class ParakeetEngine : ISttEngine
         long V = shape.Length >= 1 ? shape[^1] : 1;
         DebugRecorder.Log("INF", $"Inference done in {sw.ElapsedMilliseconds}ms. Output shape=[{string.Join(",", shape)}]");
 
-        var logits = output.GetTensorDataAsSpan<float>();
+        var logits = output.GetTensorDataAsSpan<float>().ToArray(); // copy NOW — span dangles after results.Dispose()
         var tokens = new List<int>();
         for (int t = 0; t < (int)T; t++)
         {
@@ -280,5 +311,23 @@ public sealed class ParakeetEngine : ISttEngine
         }
     }
 
-    public void Dispose() => _session?.Dispose();
+    public void Dispose()
+    {
+        if (_isDisposed) return;
+        _isDisposed = true;
+
+        // Wait for any in-flight Run to finish before tearing down the session
+        // (never dispose the DML session mid-Run — native use-after-free crash).
+        _runGate.Wait();
+        try
+        {
+            _session?.Dispose();
+            _runOptions?.Dispose();
+        }
+        finally
+        {
+            _runGate.Release();
+            _runGate.Dispose();
+        }
+    }
 }
