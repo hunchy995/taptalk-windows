@@ -1,3 +1,19 @@
+
+## 2026-08-09 — REGRESSION FIX: event-sync WASAPI captured ZERO audio → revert to polling mode
+
+**Symptom (8th report):** after the stop-hang fix (which added `useEventSync: true`), the app no longer hangs BUT captures zero audio: `Samples=0 | Audio=0.00s | Rate=0 samples/s` over 3.37s. WASAPI opens fine (`48000Hz 32-bit 1ch IeeeFloat`), model loads, no [AUDIO] metric lines (they only log when samples > 0).
+
+**Root cause (coding-partner confirmed):** `useEventSync: true` depends on the audio driver signaling a wait handle. AMD/Realtek/USB audio drivers often fail to signal it → `DataAvailable` never fires → zero samples. Regression timeline proved it: the previous build (`useEventSync: false`) captured audio fine; this build (event-sync) captured none.
+
+**Fix (coding-partner verified, commit pending):**
+1. **Revert to `new WasapiCapture(device, useEventSync: false)`** (polling mode — NAudio's own timer loop, wide driver compatibility).
+2. **Keep the stop-hang protections** (they don't need event-sync): unsubscribe handlers BEFORE StopRecording, time-box StopRecording via Task.Run + Task.WhenAny(2s), orphan + background-dispose on timeout, OnRecordingStopped never disposes from the capture thread.
+3. **Add diagnostics** to distinguish "callback never fires" vs "pipeline conversion choke" next round:
+   - `[REC] FIRST CHUNK: N raw bytes arrived in callback` (logs instantly on first DataAvailable)
+   - `[AUDIO] Bytes=N | produced=M this sec` OR `⚠️ Bytes=N but pipeline yielded 0 samples this interval` (once/sec)
+4. BufferedWaveProvider `BufferLength = AverageBytesPerSecond * 10` (10s headroom).
+
+**Diagnostic ladder (no audio):** (1) `FIRST CHUNK` absent = DataAvailable never fires → capture-mode/driver issue (revert event-sync, check device); (2) `FIRST CHUNK` present + `pipeline yielded 0` = conversion choke (pipeline/WDL issue); (3) no warning + bytes flowing = audio levels (check AUDIO peak/RMS).
 # Taptalk — Development Log
 
 Chronological record of fixes. Latest first. Companion to the `taptalk-windows` skill.

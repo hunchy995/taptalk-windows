@@ -16,19 +16,12 @@ namespace Taptalk.Core;
 /// → empty transcription. MME also drops ~7% of buffers under load (measured rate
 /// 14875 vs target 16000 in the user log).
 ///
-/// WHY EVENT-SYNC + TIME-BOXED STOP — structural fix Aug 2026 (stop hang):
-/// WasapiCapture.StopRecording() internally does captureThread.Join(). If the capture
-/// thread is blocked in a native driver read, Join blocks forever. Calling it on the
-/// UI thread freezes the dispatcher → stop shortcut AND overlay tap both stop working
-/// → "records forever until force close". Also: WasapiCapture.RecordingStopped fires
-/// ON THE CAPTURE THREAD — disposing the capture from that handler = self-join deadlock.
-///
-/// Fixes:
-/// - useEventSync:true — event-driven wake instead of sleep loop (reliable stop).
-/// - Stop() unsubscribes handlers FIRST, then time-boxes StopRecording via Task.Run
-///   + Task.WhenAny(2s). Never blocks the UI thread; on timeout the device is orphaned
-///   and disposed on a background thread.
-/// - OnRecordingStopped never disposes from the capture thread — logs + raises OnError.
+/// WHY POLLING MODE (NOT EVENT-SYNC) — regression fix Aug 9 2026:
+/// useEventSync:true depends on the driver signaling a wait handle; AMD/Realtek/USB
+/// audio drivers often fail to signal it → DataAvailable never fires → ZERO samples
+/// (observed: build with event-sync captured 0 samples for 3.37s). Polling mode
+/// (default, useEventSync:false) uses NAudio's own timer loop = wide driver compat.
+/// Stop safety is provided by time-boxing, not event-sync.
 /// </summary>
 public sealed class AudioCapture : IDisposable
 {
@@ -50,6 +43,10 @@ public sealed class AudioCapture : IDisposable
     private double _rmsSum;
     private int _silenceRunsMs;
     private string _negotiatedFormat = "";
+    private bool _firstChunkLogged;
+    private long _totalBytesReceived;
+    private long _totalSamplesProduced;
+    private DateTime _lastDiagTime = DateTime.MinValue;
 
     public event Action<float[]>? OnChunk; // raised per chunk with float32 16kHz mono PCM
     public event Action<string>? OnError;  // raised when the capture device fails
@@ -102,6 +99,10 @@ public sealed class AudioCapture : IDisposable
         _rmsSum = 0;
         _silenceRunsMs = 0;
         _negotiatedFormat = "";
+        _firstChunkLogged = false;
+        _totalBytesReceived = 0;
+        _totalSamplesProduced = 0;
+        _lastDiagTime = DateTime.Now;
 
         DebugRecorder.Log("REC", $"Initializing WASAPI capture: DeviceIdx={DeviceNumber} Name='{GetDeviceName(DeviceNumber)}'");
 
@@ -124,9 +125,14 @@ public sealed class AudioCapture : IDisposable
             if (_selectedDevice == null)
                 throw new InvalidOperationException("No microphone device found.");
 
-            // 2. WASAPI capture — event-sync mode (event-driven wake = reliable StopRecording,
-            //    no sleep-loop starvation). Shared mode uses the device's NATIVE format.
-            _capture = new WasapiCapture(_selectedDevice, useEventSync: true);
+            // 2. WASAPI capture — POLLING mode (useEventSync: false). Event-sync mode depends
+            //    on the driver signaling a wait handle; AMD/Realtek/USB audio drivers often
+            //    fail to signal it → DataAvailable never fires → ZERO samples (regression found
+            //    Aug 9: build with useEventSync:true captured 0 samples for 3.37s on the user's
+            //    AMD machine). Polling mode uses NAudio's own timer loop = wide driver compat.
+            //    The stop-hang protection (time-box + unsubscribe + orphan) makes event-sync
+            //    unnecessary for stopping.
+            _capture = new WasapiCapture(_selectedDevice, useEventSync: false);
 
             var native = _capture.WaveFormat;
             _negotiatedFormat = $"{native.SampleRate}Hz {native.BitsPerSample}-bit {native.Channels}ch ({native.Encoding})";
@@ -135,7 +141,9 @@ public sealed class AudioCapture : IDisposable
             // 3. Pipeline: BufferedWaveProvider → sample provider → mono → 16kHz → 16-bit PCM
             _captureBuffer = new BufferedWaveProvider(native)
             {
-                DiscardOnBufferOverflow = true
+                DiscardOnBufferOverflow = true,
+                // 10s buffer — safe headroom if the consumer thread lags
+                BufferLength = native.AverageBytesPerSecond * 10
             };
 
             ISampleProvider stream = _captureBuffer.ToSampleProvider();
@@ -224,12 +232,21 @@ public sealed class AudioCapture : IDisposable
     {
         if (!IsRecording || e.BytesRecorded == 0 || _captureBuffer == null) return;
 
+        // Diagnostic: log first chunk arrival instantly (proves DataAvailable fires)
+        if (_firstChunkLogged == false)
+        {
+            _firstChunkLogged = true;
+            DebugRecorder.Log("REC", $"FIRST CHUNK: {e.BytesRecorded} raw bytes arrived in callback");
+        }
+        _totalBytesReceived += e.BytesRecorded;
+
         // Push native bytes into the pipeline
         _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
 
         // Read resampled 16-bit mono 16kHz PCM out
         byte[] outBuffer = new byte[e.BytesRecorded];
         var chunkSamples = new List<float>(e.BytesRecorded / 2);
+        int localSamples = 0;
 
         while (true)
         {
@@ -241,6 +258,18 @@ public sealed class AudioCapture : IDisposable
                 short s = (short)(outBuffer[i] | (outBuffer[i + 1] << 8));
                 chunkSamples.Add(s / 32768f);
             }
+            localSamples += bytesRead / 2;
+        }
+
+        // Diagnostic: bytes arriving but pipeline yields 0 → conversion choke (once/sec)
+        var now2 = DateTime.Now;
+        if ((now2 - _lastDiagTime).TotalSeconds >= 1.0)
+        {
+            if (localSamples == 0 && _totalBytesReceived > 0)
+                DebugRecorder.Log("AUDIO", $"⚠️ Bytes={_totalBytesReceived} but pipeline yielded 0 samples this interval — conversion choke");
+            else
+                DebugRecorder.Log("AUDIO", $"Bytes={_totalBytesReceived} | produced={_totalSamplesProduced} this sec");
+            _lastDiagTime = now2;
         }
 
         if (chunkSamples.Count == 0) return;
