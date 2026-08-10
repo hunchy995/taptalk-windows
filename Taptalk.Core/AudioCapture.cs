@@ -1,21 +1,38 @@
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace Taptalk.Core;
 
 /// <summary>
 /// Captures microphone audio at 16kHz mono into a growing float buffer.
-/// Port of the Android AudioRecorder with progressive streaming support.
+///
+/// WHY WASAPI (NOT WaveInEvent/MME) — structural fix Aug 2026:
+/// WaveInEvent uses the legacy Windows MME API. Modern USB mics (Xiaomi, many
+/// headsets, monitors) run natively at 32-bit IEEE float or 24-bit PCM, NOT 16-bit.
+/// When MME is asked for 16kHz/16-bit/mono it silently fails the conversion and hands
+/// the app raw 32-bit float bytes — misread as 16-bit integers → normal speech
+/// (0.1f) becomes tiny garbage (~0.0135 = -56 dBFS) → the ASR model sees silence
+/// → empty transcription. MME also drops ~7% of buffers under load (measured rate
+/// 14875 vs target 16000 in the user log).
+///
+/// WASAPI in Shared mode opens the device's NATIVE format (guaranteed to succeed),
+/// then this class downmixes to mono, resamples to 16kHz and converts to 16-bit PCM
+/// in managed code. Amplitude is preserved correctly.
 /// </summary>
 public sealed class AudioCapture : IDisposable
 {
     public const int SampleRate = 16000;
 
-    private WaveInEvent? _waveIn;
+    private WasapiCapture? _capture;
+    private BufferedWaveProvider? _captureBuffer;
+    private IWaveProvider? _pipeline;
     private readonly List<float> _pcmSamples = new();
     private readonly object _lock = new();
     private int _generation; // incremented each Start; stale RecordingStopped events ignored
+    private MMDevice? _selectedDevice;
 
-    // Metrics for the debug logger (updated on the NAudio callback thread)
+    // Metrics for the debug logger (updated on the WASAPI callback thread)
     private long _totalSamplesCaptured;
     private DateTime? _recordingStartTime;
     private DateTime _lastAudioLogTime = DateTime.MinValue;
@@ -23,28 +40,27 @@ public sealed class AudioCapture : IDisposable
     private float _maxPeakInWindow;
     private double _rmsSum;
     private int _silenceRunsMs;
+    private string _negotiatedFormat = "";
 
-    public event Action<float[]>? OnChunk; // raised every ~100ms with new PCM
+    public event Action<float[]>? OnChunk; // raised per chunk with float32 16kHz mono PCM
     public event Action<string>? OnError;  // raised when the capture device fails
 
-    /// <summary>-1 = Windows default recording device (WAVE_MAPPER).</summary>
+    /// <summary>-1 = Windows default recording device (null/empty name → default endpoint).</summary>
     public int DeviceNumber { get; set; } = -1;
 
     public bool IsRecording { get; private set; }
     public int TotalSamples { get { lock (_lock) return _pcmSamples.Count; } }
 
-    /// <summary>Enumerate available input devices (0 = first hardware device).</summary>
+    /// <summary>Enumerate available input devices (0 = first hardware device, -1 = System Default).</summary>
     public static List<string> EnumerateDevices()
     {
         var names = new List<string>();
         try
         {
-            int count = WaveInEvent.DeviceCount;
-            for (int i = 0; i < count; i++)
-            {
-                var caps = WaveInEvent.GetCapabilities(i);
-                names.Add(caps.ProductName);
-            }
+            using var enumerator = new MMDeviceEnumerator();
+            var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
+            foreach (var d in devices)
+                names.Add(d.FriendlyName);
         }
         catch { /* no devices / enumeration failed */ }
         return names;
@@ -52,11 +68,13 @@ public sealed class AudioCapture : IDisposable
 
     public static string GetDeviceName(int index)
     {
+        if (index < 0) return "System Default Microphone";
         try
         {
-            if (index < 0) return "System Default Microphone";
-            var caps = WaveInEvent.GetCapabilities(index);
-            return caps.ProductName;
+            using var enumerator = new MMDeviceEnumerator();
+            var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
+            if (index < devices.Count) return devices[index].FriendlyName;
+            return $"Device {index}";
         }
         catch { return $"Device {index}"; }
     }
@@ -74,51 +92,79 @@ public sealed class AudioCapture : IDisposable
         _maxPeakInWindow = 0f;
         _rmsSum = 0;
         _silenceRunsMs = 0;
+        _negotiatedFormat = "";
 
         var gen = ++_generation;
-        DebugRecorder.Log("REC", $"Initializing capture: DeviceIdx={DeviceNumber} Name='{GetDeviceName(DeviceNumber)}' 16kHz mono 100ms buffers");
+        DebugRecorder.Log("REC", $"Initializing WASAPI capture: DeviceIdx={DeviceNumber} Name='{GetDeviceName(DeviceNumber)}'");
 
-        var waveIn = new WaveInEvent
+        try
         {
-            DeviceNumber = DeviceNumber,
-            WaveFormat = new WaveFormat(SampleRate, 16, 1),
-            BufferMilliseconds = 100 // lower latency chunks for agile VAD response
-        };
-        waveIn.DataAvailable += OnDataAvailable;
-        waveIn.RecordingStopped += (_, args) =>
-        {
-            // Ignore events from a previous (stale) capture session
-            if (gen == _generation)
+            // 1. Resolve the MMDevice (default or by index)
+            using var enumerator = new MMDeviceEnumerator();
+            if (DeviceNumber < 0)
             {
-                IsRecording = false;
-                LogStopMetrics();
-                if (args.Exception != null)
-                {
-                    DebugRecorder.Error("REC", "capture stopped with exception", args.Exception);
-                    OnError?.Invoke(args.Exception.Message);
-                }
+                _selectedDevice = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console);
             }
-        };
-        _waveIn = waveIn;
-        waveIn.StartRecording();
-        IsRecording = true;
-        DebugRecorder.Log("REC", $"Recording started at {DateTime.Now:HH:mm:ss.fff}");
+            else
+            {
+                var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
+                _selectedDevice = DeviceNumber < devices.Count
+                    ? devices[DeviceNumber]
+                    : enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console);
+            }
+
+            if (_selectedDevice == null)
+                throw new InvalidOperationException("No microphone device found.");
+
+            // 2. WASAPI capture — WasapiCapture defaults to Shared mode, which uses the
+            //    device's NATIVE format (guaranteed to succeed on any hardware).
+            _capture = new WasapiCapture(_selectedDevice);
+
+            var native = _capture.WaveFormat;
+            _negotiatedFormat = $"{native.SampleRate}Hz {native.BitsPerSample}-bit {native.Channels}ch ({native.Encoding})";
+            DebugRecorder.Log("REC", $"WASAPI native format: {_negotiatedFormat}");
+
+            // 3. Pipeline: BufferedWaveProvider → sample provider → mono → 16kHz → 16-bit PCM
+            _captureBuffer = new BufferedWaveProvider(native)
+            {
+                DiscardOnBufferOverflow = true
+            };
+
+            ISampleProvider stream = _captureBuffer.ToSampleProvider();
+
+            if (native.Channels > 1)
+                stream = new MonoDownmixSampleProvider(stream);
+
+            if (native.SampleRate != SampleRate)
+                stream = new WdlResamplingSampleProvider(stream, SampleRate);
+
+            _pipeline = new SampleToWaveProvider16(stream);
+
+            // 4. Wire events + start
+            _capture.DataAvailable += OnDataAvailable;
+            _capture.RecordingStopped += OnRecordingStopped;
+            _capture.StartRecording();
+            IsRecording = true;
+            DebugRecorder.Log("REC", $"Recording started at {DateTime.Now:HH:mm:ss.fff}");
+        }
+        catch (Exception ex)
+        {
+            DebugRecorder.Error("REC", "WASAPI start failed", ex);
+            OnError?.Invoke(ex.Message);
+            Cleanup();
+        }
     }
 
     public void Stop()
     {
         IsRecording = false;
-        var w = _waveIn;
-        _waveIn = null;
-        if (w != null)
+        try
         {
-            try
-            {
-                w.StopRecording();
-                w.Dispose();
-            }
-            catch { }
+            _capture?.StopRecording();
         }
+        catch { }
+        LogStopMetrics();
+        Cleanup();
     }
 
     private void LogStopMetrics()
@@ -131,27 +177,43 @@ public sealed class AudioCapture : IDisposable
             ? _totalSamplesCaptured / (elapsedMs / 1000.0)
             : 0;
         DebugRecorder.Log("REC",
-            $"Capture stopped. Samples={_totalSamplesCaptured} | Audio={actualSec:F2}s | Active={elapsedMs / 1000.0:F2}s | Rate={measuredRate:F0} samples/s (target {SampleRate})");
+            $"Capture stopped. Samples={_totalSamplesCaptured} | Audio={actualSec:F2}s | Active={elapsedMs / 1000.0:F2}s | Rate={measuredRate:F0} samples/s (target {SampleRate}) | Format={_negotiatedFormat}");
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        if (!IsRecording) return;
+        if (!IsRecording || e.BytesRecorded == 0 || _captureBuffer == null) return;
 
-        var samples = new float[e.BytesRecorded / 2];
+        // Push native bytes into the pipeline
+        _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+
+        // Read resampled 16-bit mono 16kHz PCM out
+        byte[] outBuffer = new byte[e.BytesRecorded];
+        var chunkSamples = new List<float>(e.BytesRecorded / 2);
+
+        while (true)
+        {
+            int bytesRead = _pipeline!.Read(outBuffer, 0, outBuffer.Length);
+            if (bytesRead <= 0) break;
+
+            for (int i = 0; i + 1 < bytesRead; i += 2)
+            {
+                short s = (short)(outBuffer[i] | (outBuffer[i + 1] << 8));
+                chunkSamples.Add(s / 32768f);
+            }
+        }
+
+        if (chunkSamples.Count == 0) return;
+
+        var samples = chunkSamples.ToArray();
         float peak = 0f;
         double sumSq = 0;
-        for (int i = 0; i < samples.Length; i++)
+        foreach (var v in samples)
         {
-            // 16-bit little-endian PCM → float [-1, 1]
-            short s = (short)(e.Buffer[i * 2] | (e.Buffer[i * 2 + 1] << 8));
-            float v = s / 32768f;
-            samples[i] = v;
             float abs = Math.Abs(v);
             if (abs > peak) peak = abs;
             sumSq += v * v;
         }
-
         double rms = samples.Length > 0 ? Math.Sqrt(sumSq / samples.Length) : 0;
 
         lock (_lock) _pcmSamples.AddRange(samples);
@@ -160,7 +222,7 @@ public sealed class AudioCapture : IDisposable
         if (peak > _maxPeakInWindow) _maxPeakInWindow = peak;
         _rmsSum += rms;
 
-        // Throttled audio metrics every ~1s (10 chunks of 100ms)
+        // Throttled audio metrics every ~1s
         var now = DateTime.Now;
         if ((now - _lastAudioLogTime).TotalMilliseconds >= 1000)
         {
@@ -177,6 +239,30 @@ public sealed class AudioCapture : IDisposable
         OnChunk?.Invoke(samples);
     }
 
+    private void OnRecordingStopped(object? sender, StoppedEventArgs e)
+    {
+        if (e.Exception != null)
+        {
+            DebugRecorder.Error("REC", "WASAPI capture stopped with exception", e.Exception);
+            OnError?.Invoke(e.Exception.Message);
+        }
+        Cleanup();
+    }
+
+    private void Cleanup()
+    {
+        if (_capture != null)
+        {
+            _capture.DataAvailable -= OnDataAvailable;
+            _capture.RecordingStopped -= OnRecordingStopped;
+            _capture.Dispose();
+            _capture = null;
+        }
+        _captureBuffer = null;
+        _pipeline = null;
+        _selectedDevice = null;
+    }
+
     /// <summary>Called by VAD on the callback thread when silence is detected (never blocks).</summary>
     public void NoteSilence(int ms) => _silenceRunsMs = ms;
 
@@ -187,4 +273,42 @@ public sealed class AudioCapture : IDisposable
     }
 
     public void Dispose() => Stop();
+}
+
+/// <summary>Downmixes any multi-channel sample provider to mono without clipping.</summary>
+public class MonoDownmixSampleProvider : ISampleProvider
+{
+    private readonly ISampleProvider _source;
+    private readonly int _sourceChannels;
+    private float[] _sourceBuffer;
+
+    public MonoDownmixSampleProvider(ISampleProvider source)
+    {
+        _source = source ?? throw new ArgumentNullException(nameof(source));
+        _sourceChannels = source.WaveFormat.Channels;
+        WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(source.WaveFormat.SampleRate, 1);
+        _sourceBuffer = Array.Empty<float>();
+    }
+
+    public WaveFormat WaveFormat { get; }
+
+    public int Read(float[] buffer, int offset, int count)
+    {
+        int sourceSamplesRequired = count * _sourceChannels;
+        if (_sourceBuffer.Length < sourceSamplesRequired)
+            _sourceBuffer = new float[sourceSamplesRequired];
+
+        int samplesRead = _source.Read(_sourceBuffer, 0, sourceSamplesRequired);
+        int outSamples = samplesRead / _sourceChannels;
+
+        for (int i = 0; i < outSamples; i++)
+        {
+            float sum = 0;
+            for (int c = 0; c < _sourceChannels; c++)
+                sum += _sourceBuffer[i * _sourceChannels + c];
+            buffer[offset + i] = sum / _sourceChannels;
+        }
+
+        return outSamples;
+    }
 }

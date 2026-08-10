@@ -1,4 +1,17 @@
 
+## 2026-08-09 — STRUCTURAL AUDIO FIX: MME/WaveInEvent misreads 32-bit-float mics → WASAPI
+
+**Symptom (6th report):** after the crash + normalization fixes, still empty transcription. User screenshot PROVED mic permission is granted (Taptalk.WPF in the mic access list, 42 requests). Other apps (Discord, etc.) hear the user fine. Log: Peak=0.0135 / RMS=0.0016 (~-56 dBFS) from EVERY mic + `Rate=14875 samples/s (target 16000)` (~7% buffer loss).
+
+**Root cause (coding-partner structural analysis):** `WaveInEvent` uses the legacy Windows MME audio API. Modern USB mics (Xiaomi Desktop Speaker, many headsets/monitors) run natively at **32-bit IEEE float or 24-bit PCM — NOT 16-bit**. When MME is asked for 16kHz/16-bit/mono, the driver-side conversion fails SILENTLY and hands the app raw 32-bit float bytes. The app read them as 16-bit integers → normal speech (0.1f) looks like tiny garbage (~0.0135) → model sees silence. MME also drops ~7% of buffers under load (measured 14875 vs 16000).
+
+**Fix (commit pending):** rewrote `Taptalk.Core/AudioCapture.cs` from WaveInEvent → **WasapiCapture** (modern Windows audio stack):
+- Resolves MMDevice via `MMDeviceEnumerator` (default endpoint or by index — DeviceNumber semantics unchanged: -1 = System Default, 0+ = enumerated device).
+- `WasapiCapture` in Shared mode opens the device's **NATIVE format** (guaranteed success, logs the actual negotiated format: `[REC] WASAPI native format: 48000Hz 32-bit 2ch`).
+- Pipeline: `BufferedWaveProvider` → `ToSampleProvider` → `MonoDownmixSampleProvider` (new helper, multi-channel → mono, no clipping) → `WdlResamplingSampleProvider` (→ 16kHz) → `SampleToWaveProvider16` (→ 16-bit PCM) → read into the same float buffer/OnChunk/GetSnapshot contract.
+- All existing metrics logging, generation guard, OnError, NoteSilence preserved. No MainWindow/VAD changes needed (same public surface).
+- **Verification in next log:** `[REC] WASAPI native format: ...` + `Rate=16000 samples/s` exactly + AUDIO Peak under speech should be 0.4-0.9 instead of 0.0135.
+
 ## 2026-08-09 — Empty transcription root cause: mic input near noise floor → added audio normalization
 
 **Symptom (crash FIXED, now empty text):** after the concurrency-gate fix the app no longer crashes, but transcripts are empty. User log proved it:
