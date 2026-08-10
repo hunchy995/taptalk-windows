@@ -83,6 +83,14 @@ Taptalk.sln
  └── .github/workflows/      # CI → builds installer automatically
 ```
 
+## Development Log
+
+Every fix, root cause, and decision is documented chronologically in **`docs/DEVLOG.md`**
+(full pipeline: crash fixes, WASAPI audio migration, mic normalization, debugger, CI builds).
+Current status: recording ✅ · stop ✅ · transcription → verify with the in-app debug log
+(`%LOCALAPPDATA%\Taptalk\Logs\debug.log`).
+
 ## Privacy
+
 
 100% on-device. Audio never leaves your machine. No cloud, no account, no telemetry.

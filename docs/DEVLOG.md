@@ -1,3 +1,6 @@
+# Taptalk — Development Log
+
+Chronological record of fixes. Latest first. Companion to the `taptalk-windows` skill.
 
 ## 2026-08-09 — STOP HANG after WASAPI switch: capture-thread Join deadlock → event-sync + time-boxed stop
 
@@ -14,25 +17,29 @@
 - `OnRecordingStopped`: NEVER disposes from the capture thread — logs + raises OnError only (unexpected stops → MainWindow resets state; next Start() creates a fresh capture).
 - Fresh WasapiCapture per Start() (NAudio instances aren't restartable — confirmed pattern).
 
+**Files:** `Taptalk.Core/AudioCapture.cs` (commit 5f9ee25)
+
 ## 2026-08-09 — STRUCTURAL AUDIO FIX: MME/WaveInEvent misreads 32-bit-float mics → WASAPI
 
 **Symptom (6th report):** after the crash + normalization fixes, still empty transcription. User screenshot PROVED mic permission is granted (Taptalk.WPF in the mic access list, 42 requests). Other apps (Discord, etc.) hear the user fine. Log: Peak=0.0135 / RMS=0.0016 (~-56 dBFS) from EVERY mic + `Rate=14875 samples/s (target 16000)` (~7% buffer loss).
 
 **Root cause (coding-partner structural analysis):** `WaveInEvent` uses the legacy Windows MME audio API. Modern USB mics (Xiaomi Desktop Speaker, many headsets/monitors) run natively at **32-bit IEEE float or 24-bit PCM — NOT 16-bit**. When MME is asked for 16kHz/16-bit/mono, the driver-side conversion fails SILENTLY and hands the app raw 32-bit float bytes. The app read them as 16-bit integers → normal speech (0.1f) looks like tiny garbage (~0.0135) → model sees silence. MME also drops ~7% of buffers under load (measured 14875 vs 16000).
 
-**Fix (commit pending):** rewrote `Taptalk.Core/AudioCapture.cs` from WaveInEvent → **WasapiCapture** (modern Windows audio stack):
+**Fix (commit 45c7359):** rewrote `Taptalk.Core/AudioCapture.cs` from WaveInEvent → **WasapiCapture** (modern Windows audio stack):
 - Resolves MMDevice via `MMDeviceEnumerator` (default endpoint or by index — DeviceNumber semantics unchanged: -1 = System Default, 0+ = enumerated device).
 - `WasapiCapture` in Shared mode opens the device's **NATIVE format** (guaranteed success, logs the actual negotiated format: `[REC] WASAPI native format: 48000Hz 32-bit 2ch`).
 - Pipeline: `BufferedWaveProvider` → `ToSampleProvider` → `MonoDownmixSampleProvider` (new helper, multi-channel → mono, no clipping) → `WdlResamplingSampleProvider` (→ 16kHz) → `SampleToWaveProvider16` (→ 16-bit PCM) → read into the same float buffer/OnChunk/GetSnapshot contract.
 - All existing metrics logging, generation guard, OnError, NoteSilence preserved. No MainWindow/VAD changes needed (same public surface).
 - **Verification in next log:** `[REC] WASAPI native format: ...` + `Rate=16000 samples/s` exactly + AUDIO Peak under speech should be 0.4-0.9 instead of 0.0135.
 
+**Files:** `Taptalk.Core/AudioCapture.cs`, `Taptalk.Core/AudioCapture.cs` (MonoDownmixSampleProvider)
+
 ## 2026-08-09 — Empty transcription root cause: mic input near noise floor → added audio normalization
 
 **Symptom (crash FIXED, now empty text):** after the concurrency-gate fix the app no longer crashes, but transcripts are empty. User log proved it:
 `[AUDIO] Peak=0.0135 | AvgRMS=0.0016` (~-56 dBFS = near digital silence) → `[DEC] Raw frames=18 | blank=18 | collapsed tokens=0` — **the model works perfectly; it decodes silence as all-blank.** Both the Windows default mic and the Xiaomi hardware mic delivered the same tiny levels → Windows mic input level is very low.
 
-**Fix (coding-partner verified):**
+**Fix (coding-partner verified, commit 970ce1a):**
 1. **`Taptalk.Core/AudioNormalizer.cs`** (new): in-place DC-offset removal (zero-mean) + peak normalization to 0.90 target with 30x gain cap + hard clamp; `ApplyGainInPlace` for segments; `Measure()` returns peak+RMS. Below 0.0005 peak → treated as digital silence, no amplification (avoid noise hallucinations).
 2. **Both engines** normalize before featurization/inference: `NormalizeForInference` copies the buffer (never mutates the session snapshot), logs raw peak/RMS + applied gain, and logs a prominent `⚠️ Mic level very low!` warning when RMS < 0.003 (~-50 dBFS).
 3. **Partials use the growing session snapshot** (caller passes accumulated buffer) so the gain is stable across the session — no per-window gain pumping (partner: independent partial normalization amplifies silence windows into hallucinations).
@@ -40,22 +47,23 @@
 5. **UI:** `🔊 Fix Sound` button opens Windows Sound → Recording tab (`control mmsys.cpl,,recording`) so the user can raise mic input level/boost directly.
 6. Partner decision: **do NOT auto-adjust OS mic levels** (would break other apps' calibration); normalize in-app + guide the user.
 
+**Files:** `Taptalk.Core/AudioNormalizer.cs` (new), `Taptalk.Core/ISttEngine.cs`, `ParakeetEngine.cs`, `WhisperEngine.cs`, `MainWindow.xaml`, `MainWindow.xaml.cs`
+
 ## 2026-08-09 — CRASH FIX: concurrent ONNX/DirectML Run() → native 0xC0000005 (research-backed)
 
 **Symptom (5th report, user furious):** after stopping recording the icon turns blue (processing) and the app COMPLETELY crashes — every time, no dialog. Four prior updates failed to fix it.
 
 **Root cause (3 parallel deep-research subagents + coding-partner review):** the 1.5s partial-transcription DispatcherTimer and StopAndTranscribeAsync BOTH call `_engine.Transcribe()` via Task.Run → concurrent `_session.Run()` on the same DirectML InferenceSession. ORT's DirectML EP is NOT safe for concurrent Run() (especially with variable input shapes that force DML shader recompilation, making partials take 1-3s → a partial is almost always mid-flight at stop). Result: native access violation (0xC0000005) in dml/onnxruntime.dll — silent process death, uncatchable by managed try/catch.
 
-**Fixes applied:**
+**Fixes applied (commit 14f6bdf):**
 1. **SemaphoreSlim _runGate (1,1) in BOTH engines** — serializes ALL Run() calls (partial + full + Dispose). Blocking Wait() is fine (on Task.Run threads).
 2. **GetTensorDataAsSpan → .ToArray()** — copy logits to managed array inside the using block (span dangles after results dispose = #1 C# ORT crash class).
 3. **DML SessionOptions stabilizers:** `ExecutionMode.ORT_SEQUENTIAL` + `EnableMemoryPattern=false`.
 4. **Gated Dispose()** — never dispose session/context mid-Run (use-after-free).
 5. **App.xaml.cs full safety net:** AppDomain.UnhandledException + TaskScheduler.UnobservedTaskException + DispatcherUnhandledException → all log to %LOCALAPPDATA%\Taptalk\Logs\crash.log; only CLIPBRD_E_CANT_OPEN is swallowed (Handled=true).
 6. **CheckVad wrapped in try/catch** (NAudio DataAvailable can fire after Stop — never let it escape the wave thread).
-# Taptalk — Development Log
 
-Chronological record of fixes. Latest first. Companion to the `taptalk-windows` skill.
+**Files:** `ParakeetEngine.cs`, `WhisperEngine.cs`, `App.xaml.cs`, `MainWindow.xaml.cs`
 
 ## 2026-08-07 — Comprehensive in-app debugger (user request)
 
@@ -75,7 +83,7 @@ Chronological record of fixes. Latest first. Companion to the `taptalk-windows` 
   - ERR: full exception + stack + stage
 - UI: "🔍 Debug" checkbox (default ON) filters verbose tags ([AUDIO]/[FEAT]/[INF]/[DEC]) in the LogBox; "Clear" button; LogBox capped at 1000 lines; file always records everything.
 
-**Files:** `Taptalk.Core/DebugRecorder.cs` (new), `AudioCapture.cs`, `MelScaleFeaturizer.cs`, `ParakeetEngine.cs`, `WhisperEngine.cs`, `TextInjector.cs`, `MainWindow.xaml`, `MainWindow.xaml.cs`
+**Files:** `Taptalk.Core/DebugRecorder.cs` (new), `AudioCapture.cs`, `MelScaleFeaturizer.cs`, `ParakeetEngine.cs`, `WhisperEngine.cs`, `TextInjector.cs`, `MainWindow.xaml`, `MainWindow.xaml.cs` (commit 9308908)
 
 ## 2026-08-07 — Empty transcription fixed (vocab.txt)
 
@@ -83,7 +91,7 @@ Chronological record of fixes. Latest first. Companion to the `taptalk-windows` 
 
 **Root cause:** `ParakeetEngine._vocab` was never loaded — `DecodeTokens` fell back to `string.Join(" ", tokens)` (raw IDs / empty). The model also needs SentencePiece BPE decoding (`\u2581` → space).
 
-**Fix (with coding partner):**
+**Fix (with coding partner, commit cdbf775):**
 - `LoadVocabularyFromFile()` parses `"token index"` vocab.txt
 - `AutoLoadSiblingVocab()` in `LoadModel()` finds vocab.txt next to model.onnx
 - `DecodeTokens()` skips `<...>` special tokens, converts `\u2581` → space, collapses whitespace
@@ -99,7 +107,7 @@ Chronological record of fixes. Latest first. Companion to the `taptalk-windows` 
 1. VAD auto-stop ran `StopAndTranscribeAsync` on the NAudio callback thread → WPF cross-thread crash → device died → `IsRecording=false` → every tap looked like a fresh start
 2. Alt+Space is Windows' system-menu shortcut + typematic auto-repeat double-fired the hotkey
 
-**Fix:**
+**Fix (commit da733f4):**
 - `RecordingState` enum (Idle/Recording/Transcribing), all transitions on UI thread
 - VAD stop marshaled via `Dispatcher.BeginInvoke`
 - Hotkey → **Ctrl+Shift+Space** + 500ms debounce
@@ -114,7 +122,7 @@ Chronological record of fixes. Latest first. Companion to the `taptalk-windows` 
 
 **Root cause:** `CheckVad` read `AutoStopChk.IsChecked` (WPF control) on the NAudio thread.
 
-**Fix:** cache `_autoStop` on UI thread; all audio-thread UI updates via `Dispatcher.BeginInvoke`.
+**Fix (commit e9e89d2):** cache `_autoStop` on UI thread; all audio-thread UI updates via `Dispatcher.BeginInvoke`.
 
 **Files:** `MainWindow.xaml.cs`, `MainWindow.xaml`
 
@@ -122,13 +130,13 @@ Chronological record of fixes. Latest first. Companion to the `taptalk-windows` 
 
 **Root cause (toggle):** mic device dying instantly (Windows privacy) → `IsRecording=false` → every tap started fresh. Also stale `RecordingStopped` events from old capture instances clearing a live recording.
 
-**Fix:** `_recordingRequested` intent flag + generation counter in AudioCapture. Added mic dropdown (default = Windows default), Mic Privacy button, no-audio watchdog.
+**Fix (commit 24bce19):** `_recordingRequested` intent flag + generation counter in AudioCapture. Added mic dropdown (default = Windows default), Mic Privacy button, no-audio watchdog.
 
 ## 2026-08-06 — Static CRT for whisper.dll
 
 **Symptom:** `0x8007007E Unable to load DLL 'whisper.dll' or one of its dependencies` on user PC (CI runner had VS runtime, user didn't).
 
-**Fix:** `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` in CI cmake.
+**Fix (commit f41a9de):** `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` in CI cmake.
 
 ## 2026-08-06 — CI: VS 17 generator → Ninja + msvc-dev-cmd
 
