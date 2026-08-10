@@ -1,4 +1,21 @@
 
+## 2026-08-09 — Mic level -56dBFS but "other apps hear me fine": per-app session volume + endpoint diagnosis + noise gate (10th report)
+
+**Symptom:** pipeline NOW works (FIRST CHUNK, Samples=48640, inference runs) but AvgRMS=0.0016 (-56 dBFS) on TWO mics while Discord/Voice Recorder hear the user fine. Permissions granted (42 access events).
+
+**Research insight (web subagent + coding-partner):** "other apps fine" does NOT rule out low system mic level — Discord/Voice Recorder apply their OWN AGC/noise-suppression on top of raw WASAPI shared capture. Taptalk's WasapiCapture is PURE PASSTHROUGH. The two app-addressable causes:
+1. **Per-app capture session volume** (Volume Mixer input slider) persisted LOW for Taptalk specifically — the #1 cause of "my app quiet, others fine". Windows persists it per-app.
+2. **Endpoint Levels slider** low on the device (applies to ALL shared-mode apps) — masked by other apps' AGC.
+
+**Fixes (commit pending, coding-partner verified):**
+- `LogEndpointVolumeAndNormalizeSession()` in AudioCapture.Start() (after StartRecording):
+  - Logs endpoint `AudioEndpointVolume.MasterVolumeLevelScalar` (the Levels slider) + warns if < 60% (never auto-raises — global side effect).
+  - Deferred (150ms, Task.Run) index-based session scan; finds OUR session via `GetProcessID == (uint)Environment.ProcessId`; sets `SimpleAudioVolume.Volume = 1.0` + unmute (per-app only, safe).
+- **Noise gate** in AudioNormalizer: samples below `SilenceFloor*8` (~-54 dBFS) zeroed AFTER gain — so 30x boost can't amplify noise floor into ASR hallucinations.
+- NAudio 2.2.1 API: `AudioSessionControl.GetProcessID` is a uint PROPERTY; `SimpleAudioVolume.Volume/Mute` are read/write properties; use index-based Sessions loop (foreach throws on session churn).
+
+**Next-log expectations:** `Endpoint mic level: NN% (Windows Levels slider)` + either `🔊 Fixed Taptalk per-app mic volume` (if it was the cause) or `⚠️ No dedicated WASAPI session found`. If endpoint level is low (e.g. 10%), the fix is Windows Sound → Input level (guide user; app never changes global level silently).
+
 ## 2026-08-09 — ZERO samples despite FIRST CHUNK: live WDL pipeline stalls → RAW-capture + post-conversion (9th report)
 
 **Symptom:** after the polling-mode revert, `FIRST CHUNK: 5760 raw bytes arrived in callback` proves DataAvailable fires, but `Samples=0 | Rate=0 samples/s` — the live pipeline produced nothing for 2.4s.

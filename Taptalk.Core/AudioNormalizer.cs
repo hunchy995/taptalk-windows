@@ -41,13 +41,19 @@ public static class AudioNormalizer
         float idealGain = TargetPeak / peak;
         float appliedGain = Math.Min(idealGain, MaxGainLimit);
 
-        // 3. Apply gain with hard clamp
+        // 3. Apply gain with hard clamp + NOISE GATE: samples below the gate threshold are
+        //    zeroed so boosted background noise doesn't reach the ASR model as "speech".
+        //    Gate = SilenceFloor * 8 (~ -54 dBFS). Speech peaks >> gate; noise floor << gate.
         if (Math.Abs(appliedGain - 1.0f) > 0.01f)
         {
+            float gateThreshold = SilenceFloor * 8f;
             for (int i = 0; i < samples.Length; i++)
             {
                 float v = samples[i] * appliedGain;
-                samples[i] = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
+                if (Math.Abs(v) < gateThreshold)
+                    samples[i] = 0f;
+                else
+                    samples[i] = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
             }
         }
 

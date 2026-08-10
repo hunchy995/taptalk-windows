@@ -145,6 +145,10 @@ public sealed class AudioCapture : IDisposable
             _capture.StartRecording();
             IsRecording = true;
             DebugRecorder.Log("REC", $"Recording started at {DateTime.Now:HH:mm:ss.fff}");
+
+            // Diagnose + self-fix volume: log the endpoint Levels slider, and normalize
+            // OUR per-app capture session volume (the #1 cause of "my app quiet, others fine").
+            LogEndpointVolumeAndNormalizeSession();
         }
         catch (Exception ex)
         {
@@ -280,6 +284,93 @@ public sealed class AudioCapture : IDisposable
             DebugRecorder.Error("REC", "WASAPI capture stopped unexpectedly", e.Exception);
             OnError?.Invoke(e.Exception.Message);
         }
+    }
+
+    /// <summary>
+    /// Diagnose + self-fix mic volume (research-backed, Aug 9 2026).
+    /// "Other apps hear me fine but Taptalk is quiet" has TWO causes we can address here:
+    /// 1. PER-APP session volume (Volume Mixer input slider) persisted low for Taptalk —
+    ///    the #1 cause of "my app quiet, others fine". We set OURS to 100% (per-app only, safe).
+    /// 2. ENDPOINT Levels slider low (applies to ALL apps) — we log it + warn; raising it
+    ///    would be global (affects Discord/Teams/etc) so we never touch it without consent.
+    /// </summary>
+    private void LogEndpointVolumeAndNormalizeSession()
+    {
+        if (_selectedDevice == null) return;
+
+        // 1. Log endpoint master volume (global Levels slider)
+        try
+        {
+            var epv = _selectedDevice.AudioEndpointVolume;
+            if (epv != null)
+            {
+                float scalar = epv.MasterVolumeLevelScalar;
+                DebugRecorder.Log("REC", $"Endpoint mic level: {scalar:P0} (Windows Levels slider)");
+                if (scalar < 0.6f)
+                    DebugRecorder.Log("REC", $"⚠️ Mic input level is only {scalar:P0} — if quiet, raise Windows Sound → Input level");
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugRecorder.Log("REC", $"Could not read endpoint volume: {ex.Message}");
+        }
+
+        // 2. Normalize OUR per-app capture session volume (deferred so WASAPI registers the session)
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(150);
+                if (_selectedDevice == null) return;
+                var mgr = _selectedDevice.AudioSessionManager;
+                if (mgr == null) return;
+                var sessions = mgr.Sessions;
+                if (sessions == null) return;
+
+                uint targetPid = (uint)Environment.ProcessId;
+                bool sessionFound = false;
+
+                // Index-based loop — foreach on COM session collection can throw if sessions churn
+                for (int i = 0; i < sessions.Count; i++)
+                {
+                    try
+                    {
+                        var session = sessions[i];
+                        if (session == null) continue;
+                        if (session.GetProcessID == targetPid)
+                        {
+                            sessionFound = true;
+                            var sav = session.SimpleAudioVolume;
+                            if (sav != null)
+                            {
+                                if (sav.Volume < 0.99f)
+                                {
+                                    sav.Volume = 1.0f;
+                                    DebugRecorder.Log("REC", $"🔊 Fixed Taptalk per-app mic volume: {sav.Volume:F2} → 1.0");
+                                }
+                                if (sav.Mute)
+                                {
+                                    sav.Mute = false;
+                                    DebugRecorder.Log("REC", "🔊 Unmuted Taptalk mic session");
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugRecorder.Log("REC", $"Skipped transient session {i}: {ex.Message}");
+                    }
+                }
+
+                if (!sessionFound)
+                    DebugRecorder.Log("REC", "⚠️ No dedicated WASAPI session found for Taptalk (defaults applied)");
+            }
+            catch (Exception ex)
+            {
+                DebugRecorder.Error("REC", "Per-app volume normalization failed", ex);
+            }
+        });
     }
 
     private void Cleanup()
