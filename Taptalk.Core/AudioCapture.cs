@@ -16,9 +16,19 @@ namespace Taptalk.Core;
 /// → empty transcription. MME also drops ~7% of buffers under load (measured rate
 /// 14875 vs target 16000 in the user log).
 ///
-/// WASAPI in Shared mode opens the device's NATIVE format (guaranteed to succeed),
-/// then this class downmixes to mono, resamples to 16kHz and converts to 16-bit PCM
-/// in managed code. Amplitude is preserved correctly.
+/// WHY EVENT-SYNC + TIME-BOXED STOP — structural fix Aug 2026 (stop hang):
+/// WasapiCapture.StopRecording() internally does captureThread.Join(). If the capture
+/// thread is blocked in a native driver read, Join blocks forever. Calling it on the
+/// UI thread freezes the dispatcher → stop shortcut AND overlay tap both stop working
+/// → "records forever until force close". Also: WasapiCapture.RecordingStopped fires
+/// ON THE CAPTURE THREAD — disposing the capture from that handler = self-join deadlock.
+///
+/// Fixes:
+/// - useEventSync:true — event-driven wake instead of sleep loop (reliable stop).
+/// - Stop() unsubscribes handlers FIRST, then time-boxes StopRecording via Task.Run
+///   + Task.WhenAny(2s). Never blocks the UI thread; on timeout the device is orphaned
+///   and disposed on a background thread.
+/// - OnRecordingStopped never disposes from the capture thread — logs + raises OnError.
 /// </summary>
 public sealed class AudioCapture : IDisposable
 {
@@ -29,7 +39,6 @@ public sealed class AudioCapture : IDisposable
     private IWaveProvider? _pipeline;
     private readonly List<float> _pcmSamples = new();
     private readonly object _lock = new();
-    private int _generation; // incremented each Start; stale RecordingStopped events ignored
     private MMDevice? _selectedDevice;
 
     // Metrics for the debug logger (updated on the WASAPI callback thread)
@@ -94,7 +103,6 @@ public sealed class AudioCapture : IDisposable
         _silenceRunsMs = 0;
         _negotiatedFormat = "";
 
-        var gen = ++_generation;
         DebugRecorder.Log("REC", $"Initializing WASAPI capture: DeviceIdx={DeviceNumber} Name='{GetDeviceName(DeviceNumber)}'");
 
         try
@@ -116,9 +124,9 @@ public sealed class AudioCapture : IDisposable
             if (_selectedDevice == null)
                 throw new InvalidOperationException("No microphone device found.");
 
-            // 2. WASAPI capture — WasapiCapture defaults to Shared mode, which uses the
-            //    device's NATIVE format (guaranteed to succeed on any hardware).
-            _capture = new WasapiCapture(_selectedDevice);
+            // 2. WASAPI capture — event-sync mode (event-driven wake = reliable StopRecording,
+            //    no sleep-loop starvation). Shared mode uses the device's NATIVE format.
+            _capture = new WasapiCapture(_selectedDevice, useEventSync: true);
 
             var native = _capture.WaveFormat;
             _negotiatedFormat = $"{native.SampleRate}Hz {native.BitsPerSample}-bit {native.Channels}ch ({native.Encoding})";
@@ -158,13 +166,45 @@ public sealed class AudioCapture : IDisposable
     public void Stop()
     {
         IsRecording = false;
-        try
+
+        WasapiCapture? cap = _capture;
+        _capture = null;   // sever the reference FIRST — no re-entrancy from the capture thread
+        _captureBuffer = null;
+        _pipeline = null;
+
+        if (cap != null)
         {
-            _capture?.StopRecording();
+            // Unsubscribe BEFORE stopping — the capture thread's RecordingStopped must be a no-op
+            cap.DataAvailable -= OnDataAvailable;
+            cap.RecordingStopped -= OnRecordingStopped;
+
+            try
+            {
+                // Time-box the stop on a background thread. NEVER block the UI thread on
+                // the capture-thread Join (that froze the dispatcher → "records forever").
+                var stopTask = Task.Run(() =>
+                {
+                    try { cap.StopRecording(); }
+                    catch (Exception ex) { DebugRecorder.Error("REC", "StopRecording", ex); }
+                });
+
+                if (Task.WhenAny(stopTask, Task.Delay(TimeSpan.FromSeconds(2))).Result != stopTask)
+                    DebugRecorder.Log("REC", "⚠️ WASAPI StopRecording timed out — driver locked; orphaning device");
+            }
+            catch (Exception ex)
+            {
+                DebugRecorder.Error("REC", "WASAPI stop", ex);
+            }
+
+            // Safe background dispose (may itself call StopRecording → Join → hang; orphan on timeout)
+            _ = Task.Run(() =>
+            {
+                try { cap.Dispose(); }
+                catch { /* orphaned device — OS reclaims on driver recovery / process exit */ }
+            });
         }
-        catch { }
+
         LogStopMetrics();
-        Cleanup();
     }
 
     private void LogStopMetrics()
@@ -241,12 +281,12 @@ public sealed class AudioCapture : IDisposable
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
     {
+        // Runs on the CAPTURE thread. NEVER dispose the capture here (self-join deadlock).
         if (e.Exception != null)
         {
-            DebugRecorder.Error("REC", "WASAPI capture stopped with exception", e.Exception);
+            DebugRecorder.Error("REC", "WASAPI capture stopped unexpectedly", e.Exception);
             OnError?.Invoke(e.Exception.Message);
         }
-        Cleanup();
     }
 
     private void Cleanup()
@@ -255,7 +295,7 @@ public sealed class AudioCapture : IDisposable
         {
             _capture.DataAvailable -= OnDataAvailable;
             _capture.RecordingStopped -= OnRecordingStopped;
-            _capture.Dispose();
+            try { _capture.Dispose(); } catch { }
             _capture = null;
         }
         _captureBuffer = null;

@@ -1,4 +1,19 @@
 
+## 2026-08-09 — STOP HANG after WASAPI switch: capture-thread Join deadlock → event-sync + time-boxed stop
+
+**Symptom (7th report):** after the WASAPI audio fix, recording works (levels good) but the stop shortcut AND overlay button BOTH fail — records forever until force-close.
+
+**Root cause (coding-partner confirmed, 100% match):**
+1. **UI-thread hijack:** `WasapiCapture.StopRecording()` internally does `captureThread.Join()`. If the capture thread is blocked in a native driver read, Join blocks forever → `StopAndTranscribeAsync` never reaches ResetToIdleState → `_state` stays `Transcribing` → OnMicTap early-returns on `if (_state == Transcribing)` → every tap ignored → "records forever". UI frozen → force-close.
+2. **Self-join deadlock:** `WasapiCapture.RecordingStopped` fires ON THE CAPTURE THREAD; my OnRecordingStopped called Cleanup() → `_capture.Dispose()` → StopRecording() → Join FROM the capture thread = self-join deadlock.
+3. **No event sync:** sleep-loop WASAPI capture is prone to blocking inside native GetBuffer if the driver stutters.
+
+**Fix (coding-partner production pattern, integrated while keeping the public interface):**
+- `new WasapiCapture(device, useEventSync: true)` — event-driven wake instead of sleep loop (reliable stop).
+- `Stop()`: sever `_capture` reference FIRST, unsubscribe handlers BEFORE StopRecording (capture-thread event becomes a no-op), then time-box StopRecording via `Task.Run` + `Task.WhenAny(2s)` — NEVER blocks the UI thread; on timeout log "orphaning device" and dispose on a background task.
+- `OnRecordingStopped`: NEVER disposes from the capture thread — logs + raises OnError only (unexpected stops → MainWindow resets state; next Start() creates a fresh capture).
+- Fresh WasapiCapture per Start() (NAudio instances aren't restartable — confirmed pattern).
+
 ## 2026-08-09 — STRUCTURAL AUDIO FIX: MME/WaveInEvent misreads 32-bit-float mics → WASAPI
 
 **Symptom (6th report):** after the crash + normalization fixes, still empty transcription. User screenshot PROVED mic permission is granted (Taptalk.WPF in the mic access list, 42 requests). Other apps (Discord, etc.) hear the user fine. Log: Peak=0.0135 / RMS=0.0016 (~-56 dBFS) from EVERY mic + `Rate=14875 samples/s (target 16000)` (~7% buffer loss).
