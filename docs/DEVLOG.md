@@ -1,4 +1,18 @@
 
+## 2026-08-09 — ZERO samples despite FIRST CHUNK: live WDL pipeline stalls → RAW-capture + post-conversion (9th report)
+
+**Symptom:** after the polling-mode revert, `FIRST CHUNK: 5760 raw bytes arrived in callback` proves DataAvailable fires, but `Samples=0 | Rate=0 samples/s` — the live pipeline produced nothing for 2.4s.
+
+**Root cause (coding-partner pattern):** the LIVE streaming pipeline (BufferedWaveProvider → WdlResamplingSampleProvider → SampleToWaveProvider16) drained on every DataAvailable never yielded on the user's machine — WDL buffers internally and the read loop stalled. WASAPI has never actually delivered samples through the live chain (earlier "recording works" reports were about the state machine; the stop-hang masked it).
+
+**Fix (commit pending):** rewrite AudioCapture to RAW-capture + post-conversion:
+- OnDataAvailable: append native bytes to a growing `_rawBytes` list (lock-protected) + compute a LIGHTWEIGHT inline RMS from raw float bytes (energy detection needs no resampling) → OnChunk for VAD.
+- GetSnapshot(): deterministic FULL conversion of the whole recording: RawSourceWaveStream → ToSampleProvider → MonoDownmixSampleProvider → WdlResamplingSampleProvider(16000) → SampleToWaveProvider16 → float[]. Runs at stop + partial ticks (2-3s audio converts fast).
+- TotalSamples: derived from raw byte count / native format (for the no-audio watchdog).
+- Keep: polling mode, stop-hang protections (unsubscribe-first + 2s time-box + orphan + no capture-thread dispose), FIRST CHUNK + per-sec AUDIO diagnostics.
+
+**Interface unchanged** (OnChunk float[] for VAD, GetSnapshot float[] 16kHz, TotalSamples, DeviceNumber, NoteSilence, OnError).
+
 ## 2026-08-09 — REGRESSION FIX: event-sync WASAPI captured ZERO audio → revert to polling mode
 
 **Symptom (8th report):** after the stop-hang fix (which added `useEventSync: true`), the app no longer hangs BUT captures zero audio: `Samples=0 | Audio=0.00s | Rate=0 samples/s` over 3.37s. WASAPI opens fine (`48000Hz 32-bit 1ch IeeeFloat`), model loads, no [AUDIO] metric lines (they only log when samples > 0).
