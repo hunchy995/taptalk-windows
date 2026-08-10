@@ -53,6 +53,16 @@ public sealed class WhisperEngine : ISttEngine
     {
         if (_ctx == IntPtr.Zero || audio.Length == 0) return "";
 
+        // Peak-normalize quiet mic input (same rescue as ParakeetEngine)
+        var (rawPeak, rawRms) = AudioNormalizer.Measure(audio);
+        float[] normalized = new float[audio.Length];
+        Array.Copy(audio, normalized, audio.Length);
+        float gain = AudioNormalizer.NormalizeInPlace(normalized);
+        if (rawRms < 0.003)
+            DebugRecorder.Log("AUDIO", $"⚠️ Mic level very low! Raw peak={rawPeak:F4} RMS={rawRms:F4} → boosted {gain:F1}x. Check Windows Sound Settings → Microphone → Input level/Boost.");
+        else
+            DebugRecorder.Log("AUDIO", $"Raw peak={rawPeak:F4} RMS={rawRms:F4} → normalized with {gain:F1}x gain");
+
         var nThreads = Math.Max(2, Environment.ProcessorCount / 2);
         var p = Native.whisper_full_default_params((int)SamplingStrategy.WhisperSamplingGreedy);
         p.n_threads = nThreads;
@@ -62,7 +72,7 @@ public sealed class WhisperEngine : ISttEngine
         p.language = Marshal.StringToHGlobalAnsi("en");
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        Native.whisper_full(_ctx, p, audio, audio.Length);
+        Native.whisper_full(_ctx, p, normalized, normalized.Length);
         sw.Stop();
         Marshal.FreeHGlobal(p.language);
 
@@ -80,6 +90,8 @@ public sealed class WhisperEngine : ISttEngine
     }
 
     public string TranscribePartial(float[] audio) => Transcribe(audio);
+
+    public void ResetSession() { } // whisper has no session-level gain state
 
     public void Dispose()
     {

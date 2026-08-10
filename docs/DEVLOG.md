@@ -1,4 +1,17 @@
 
+## 2026-08-09 — Empty transcription root cause: mic input near noise floor → added audio normalization
+
+**Symptom (crash FIXED, now empty text):** after the concurrency-gate fix the app no longer crashes, but transcripts are empty. User log proved it:
+`[AUDIO] Peak=0.0135 | AvgRMS=0.0016` (~-56 dBFS = near digital silence) → `[DEC] Raw frames=18 | blank=18 | collapsed tokens=0` — **the model works perfectly; it decodes silence as all-blank.** Both the Windows default mic and the Xiaomi hardware mic delivered the same tiny levels → Windows mic input level is very low.
+
+**Fix (coding-partner verified):**
+1. **`Taptalk.Core/AudioNormalizer.cs`** (new): in-place DC-offset removal (zero-mean) + peak normalization to 0.90 target with 30x gain cap + hard clamp; `ApplyGainInPlace` for segments; `Measure()` returns peak+RMS. Below 0.0005 peak → treated as digital silence, no amplification (avoid noise hallucinations).
+2. **Both engines** normalize before featurization/inference: `NormalizeForInference` copies the buffer (never mutates the session snapshot), logs raw peak/RMS + applied gain, and logs a prominent `⚠️ Mic level very low!` warning when RMS < 0.003 (~-50 dBFS).
+3. **Partials use the growing session snapshot** (caller passes accumulated buffer) so the gain is stable across the session — no per-window gain pumping (partner: independent partial normalization amplifies silence windows into hallucinations).
+4. **`ISttEngine.ResetSession()`** (new interface method) resets `_sessionGain` per recording; called from `StartRecording()`. WhisperEngine: no-op.
+5. **UI:** `🔊 Fix Sound` button opens Windows Sound → Recording tab (`control mmsys.cpl,,recording`) so the user can raise mic input level/boost directly.
+6. Partner decision: **do NOT auto-adjust OS mic levels** (would break other apps' calibration); normalize in-app + guide the user.
+
 ## 2026-08-09 — CRASH FIX: concurrent ONNX/DirectML Run() → native 0xC0000005 (research-backed)
 
 **Symptom (5th report, user furious):** after stopping recording the icon turns blue (processing) and the app COMPLETELY crashes — every time, no dialog. Four prior updates failed to fix it.

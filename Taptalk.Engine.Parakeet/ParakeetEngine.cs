@@ -135,14 +135,48 @@ public sealed class ParakeetEngine : ISttEngine
         if (_session == null || audio.Length < MelScaleFeaturizer.WindowSize)
             return "";
 
-        var features = _featurizer.Extract(audio);
+        var normalized = NormalizeForInference(audio, isPartial: false);
+        var features = _featurizer.Extract(normalized);
         return RunInference(features);
     }
 
     public string TranscribePartial(float[] audio)
     {
         // Same path — Parakeet handles partial buffers well
-        return Transcribe(audio);
+        var normalized = NormalizeForInference(audio, isPartial: true);
+        var features = _featurizer.Extract(normalized);
+        return RunInference(features);
+    }
+
+    public void ResetSession() => _sessionGain = 1.0f;
+
+    /// <summary>
+    /// Peak-normalize quiet mic input (DC-offset removal, 0.90 target peak, 30x cap).
+    /// Partials use the session gain computed over the FULL accumulated buffer so
+    /// short silence windows don't amplify noise into hallucinations (gain pumping).
+    /// </summary>
+    private float _sessionGain = 1.0f;
+    private float[] NormalizeForInference(float[] audio, bool isPartial)
+    {
+        if (audio.Length == 0) return audio;
+
+        // Diagnostics on the raw buffer
+        var (rawPeak, rawRms) = AudioNormalizer.Measure(audio);
+
+        float[] copy = new float[audio.Length];
+        Array.Copy(audio, copy, audio.Length);
+
+        // The caller passes the accumulated snapshot (partials grow each tick), so
+        // normalizing it gives a stable session gain — same factor for full + partials.
+        float gain = AudioNormalizer.NormalizeInPlace(copy);
+        _sessionGain = gain;
+
+        if (rawRms < 0.003)
+            DebugRecorder.Log("AUDIO", $"⚠️ Mic level very low! Raw peak={rawPeak:F4} RMS={rawRms:F4} → boosted {gain:F1}x. Check Windows Sound Settings → Microphone → Input level/Boost.");
+        else
+            DebugRecorder.Log("AUDIO", $"Raw peak={rawPeak:F4} RMS={rawRms:F4} → normalized with {gain:F1}x gain (session gain {_sessionGain:F1}x)");
+
+        return copy;
     }
 
     private string RunInference(float[,] features)

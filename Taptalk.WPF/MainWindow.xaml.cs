@@ -177,6 +177,7 @@ public partial class MainWindow : Window
         _warnedNoAudio = false;
         _vad.Reset();
         _sessionTimer.Restart();
+        _engine?.ResetSession(); // fresh session gain for this recording
 
         try
         {
@@ -470,6 +471,19 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             Log($"❌ Could not open mic settings: {ex.Message}");
+        }
+    }
+
+    private void SoundSettingsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            // Opens the Windows Sound panel → Recording tab (mic input level / boost)
+            System.Diagnostics.Process.Start(new ProcessStartInfo("control", "mmsys.cpl,,recording") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Could not open sound settings: {ex.Message}");
         }
     }
 
