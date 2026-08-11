@@ -507,12 +507,12 @@ public partial class MainWindow : Window
     {
         // Raising the Windows mic level affects EVERY app using this mic — get explicit consent
         var before = _capture.EndpointLevelScalar;
-        var confirm = MessageBox.Show(
+        var confirm = System.Windows.MessageBox.Show(
             $"Your microphone level is {before:P0} in Windows. This is why Taptalk hears almost nothing.\n\n" +
             "Raise it to 100%? (This also affects other apps using this microphone.)",
             "Fix Microphone Level",
-            MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (confirm != MessageBoxResult.Yes) return;
+            System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Question);
+        if (confirm != System.Windows.MessageBoxResult.Yes) return;
 
         _capture.RaiseEndpointVolumeToFull();
         FixMicLevelBtn.Visibility = System.Windows.Visibility.Collapsed;
