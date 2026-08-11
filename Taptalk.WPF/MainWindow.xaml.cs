@@ -185,6 +185,22 @@ public partial class MainWindow : Window
             _overlay?.SetRecording();
             StartPartialTimer();
             Log($"🎤 Recording started ({DateTime.Now:HH:mm:ss})");
+
+            // Show the Fix Mic Level button if the Windows mic level is low (< 60%)
+            Dispatcher.BeginInvoke(() =>
+            {
+                var lvl = _capture.EndpointLevelScalar;
+                if (lvl < 0.6f)
+                {
+                    FixMicLevelBtn.Visibility = System.Windows.Visibility.Visible;
+                    if (MicStatusText != null)
+                        MicStatusText.Text = $"Windows mic level is {lvl:P0} — click '🔊 Fix Mic Level' to raise it to 100%.";
+                }
+                else
+                {
+                    FixMicLevelBtn.Visibility = System.Windows.Visibility.Collapsed;
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -485,6 +501,24 @@ public partial class MainWindow : Window
         {
             Log($"❌ Could not open sound settings: {ex.Message}");
         }
+    }
+
+    private void FixMicLevelBtn_Click(object sender, RoutedEventArgs e)
+    {
+        // Raising the Windows mic level affects EVERY app using this mic — get explicit consent
+        var before = _capture.EndpointLevelScalar;
+        var confirm = MessageBox.Show(
+            $"Your microphone level is {before:P0} in Windows. This is why Taptalk hears almost nothing.\n\n" +
+            "Raise it to 100%? (This also affects other apps using this microphone.)",
+            "Fix Microphone Level",
+            MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+
+        _capture.RaiseEndpointVolumeToFull();
+        FixMicLevelBtn.Visibility = System.Windows.Visibility.Collapsed;
+        if (MicStatusText != null)
+            MicStatusText.Text = "✅ Mic level raised to 100%. Record again and it should work!";
+        Log("🔊 Mic level raised to 100%");
     }
 
     private void MinimizeBtn_Click(object sender, RoutedEventArgs e)

@@ -1,4 +1,18 @@
 
+## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
+
+**Log evidence (the smoking gun):** `Endpoint mic level: 25% (Windows Levels slider)` + `⚠️ Mic input level is only 25%`. The app's diagnostics WORKED — it read the Windows mic Levels slider and found it at 25%. Taptalk is pure passthrough (no AGC) so it hears the TRUE 25% level; Discord/other apps apply their own auto-gain and mask it. User's voice IS present (peak 0.0456, 16x above noise) but attenuated by Windows to 25%.
+
+**Also fixed:** the per-app session-volume code threw `InvalidCastException: Unable to cast COM object ... to IMMDevice (E_NOINTERFACE)` on `AudioSessionManager` — some devices don't expose it. Now best-effort only (logs a plain line, never CRITICAL). The ENDPOINT level is the real lever anyway.
+
+**Fixes (commit pending):**
+- `AudioCapture.EndpointLevelScalar` public property (reads the Levels slider).
+- `AudioCapture.RaiseEndpointVolumeToFull()` — sets `MasterVolumeLevelScalar = 1.0` (GLOBAL: affects all apps on this mic — requires user consent).
+- MainWindow: after `_capture.Start()`, if level < 60% → show **`🔊 Fix Mic Level`** button + red status text explaining the issue; button prompts Yes/No (consent for the global change) then raises + hides + confirms.
+- Session-volume normalization now best-effort (catch → plain log, no CRITICAL spam).
+
+**Next-log expectations:** either the user clicks Fix Mic Level (→ `🔊 Raised Windows mic level: 25% → 100%`) or raises it manually; then AUDIO peak should jump to 0.1+ under speech and the model should decode real words.
+
 ## 2026-08-09 — Mic level -56dBFS but "other apps hear me fine": per-app session volume + endpoint diagnosis + noise gate (10th report)
 
 **Symptom:** pipeline NOW works (FIRST CHUNK, Samples=48640, inference runs) but AvgRMS=0.0016 (-56 dBFS) on TWO mics while Discord/Voice Recorder hear the user fine. Permissions granted (42 access events).

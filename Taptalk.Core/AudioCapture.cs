@@ -50,6 +50,9 @@ public sealed class AudioCapture : IDisposable
     public event Action<float[]>? OnChunk;
     public event Action<string>? OnError;
 
+    /// <summary>Windows endpoint mic level as 0..1 scalar (the Levels slider). 1.0 = 100%.</summary>
+    public float EndpointLevelScalar { get; private set; } = 1.0f;
+
     /// <summary>-1 = Windows default recording device.</summary>
     public int DeviceNumber { get; set; } = -1;
 
@@ -305,9 +308,10 @@ public sealed class AudioCapture : IDisposable
             if (epv != null)
             {
                 float scalar = epv.MasterVolumeLevelScalar;
+                EndpointLevelScalar = scalar;
                 DebugRecorder.Log("REC", $"Endpoint mic level: {scalar:P0} (Windows Levels slider)");
                 if (scalar < 0.6f)
-                    DebugRecorder.Log("REC", $"⚠️ Mic input level is only {scalar:P0} — if quiet, raise Windows Sound → Input level");
+                    DebugRecorder.Log("REC", $"⚠️ Mic input level is only {scalar:P0} — Taptalk is pure passthrough; raise Windows Sound → Input level, or use the Fix Mic Level button");
             }
         }
         catch (Exception ex)
@@ -316,13 +320,14 @@ public sealed class AudioCapture : IDisposable
         }
 
         // 2. Normalize OUR per-app capture session volume (deferred so WASAPI registers the session)
+        //    NOTE: some devices throw COM E_NOINTERFACE on AudioSessionManager — that's fine,
+        //    the per-app fix is a best-effort; the ENDPOINT level (above) is the real lever.
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay(150);
-                if (_selectedDevice == null) return;
-                var mgr = _selectedDevice.AudioSessionManager;
+                var mgr = _selectedDevice?.AudioSessionManager;
                 if (mgr == null) return;
                 var sessions = mgr.Sessions;
                 if (sessions == null) return;
@@ -362,15 +367,34 @@ public sealed class AudioCapture : IDisposable
                         DebugRecorder.Log("REC", $"Skipped transient session {i}: {ex.Message}");
                     }
                 }
-
-                if (!sessionFound)
-                    DebugRecorder.Log("REC", "⚠️ No dedicated WASAPI session found for Taptalk (defaults applied)");
             }
             catch (Exception ex)
             {
-                DebugRecorder.Error("REC", "Per-app volume normalization failed", ex);
+                // Best-effort only — endpoint level is the real fix; never spam CRITICAL here
+                DebugRecorder.Log("REC", $"Per-app session volume not available: {ex.Message}");
             }
         });
+    }
+
+    /// <summary>
+    /// Raise the Windows endpoint mic level to 100% (the Levels slider). GLOBAL side effect
+    /// (affects every app using this mic) — call ONLY with explicit user consent.
+    /// </summary>
+    public void RaiseEndpointVolumeToFull()
+    {
+        try
+        {
+            var epv = _selectedDevice?.AudioEndpointVolume;
+            if (epv == null) return;
+            float before = epv.MasterVolumeLevelScalar;
+            epv.MasterVolumeLevelScalar = 1.0f;
+            EndpointLevelScalar = 1.0f;
+            DebugRecorder.Log("REC", $"🔊 Raised Windows mic level: {before:P0} → 100%");
+        }
+        catch (Exception ex)
+        {
+            DebugRecorder.Error("REC", "Raise endpoint volume failed", ex);
+        }
     }
 
     private void Cleanup()
