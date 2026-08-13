@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows;
 using Microsoft.Win32;
 using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
@@ -38,7 +37,7 @@ public partial class MainWindow : Window
     private readonly object _stateLock = new();
 
     private bool _autoStop = true;
-    private bool _copyOnly = false;
+    private bool _autoPaste = true;
     private readonly Stopwatch _sessionTimer = new();
     private bool _isPartialTranscribing;
     private bool _warnedNoAudio;
@@ -47,7 +46,6 @@ public partial class MainWindow : Window
     private DateTime _lastPartial = DateTime.MinValue;
     private string _lastPartialText = "";
     private System.Windows.Threading.DispatcherTimer? _partialTimer;
-    private IntPtr _recordingStartForegroundWindow = IntPtr.Zero;
 
     public MainWindow()
     {
@@ -56,12 +54,6 @@ public partial class MainWindow : Window
         Loaded += OnLoaded;
         Closing += OnClosing;
     }
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
     {
@@ -129,6 +121,32 @@ public partial class MainWindow : Window
         Log("Taptalk ready. Press Ctrl+Shift+Space or tap the overlay mic to record.");
     }
 
+    /// <summary>Parse a shortcut string like "Ctrl+D", "Ctrl+V", "Ctrl+Shift+V" into virtual-key codes.</summary>
+    private (bool ctrl, bool shift, ushort vKey) ParsePasteShortcut()
+    {
+        var text = PasteShortcutBox?.Text ?? "Ctrl+V";
+        var parts = text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        bool ctrl = false, shift = false;
+        ushort vKey = 0x56; // default V
+
+        foreach (var part in parts)
+        {
+            var p = part.ToUpperInvariant();
+            if (p == "CTRL") { ctrl = true; continue; }
+            if (p == "SHIFT") { shift = true; continue; }
+            if (p == "ALT") continue; // not supported yet
+            if (p.Length == 1)
+            {
+                // Letter/digit → virtual key code
+                var c = p[0];
+                if (c >= 'A' && c <= 'Z') vKey = (ushort)(0x41 + (c - 'A'));
+                else if (c >= '0' && c <= '9') vKey = (ushort)(0x30 + (c - '0'));
+            }
+        }
+
+        return (ctrl, shift, vKey);
+    }
+
     private void OnMicSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (MicCombo.SelectedItem is MicDevice selected)
@@ -188,11 +206,6 @@ public partial class MainWindow : Window
         _vad.Reset();
         _sessionTimer.Restart();
         _engine?.ResetSession(); // fresh session gain for this recording
-
-        // Remember which window had focus when the user started recording.
-        // We will restore this window before typing/pasting the final text.
-        try { _recordingStartForegroundWindow = GetForegroundWindow(); }
-        catch { _recordingStartForegroundWindow = IntPtr.Zero; }
 
         try
         {
@@ -353,30 +366,19 @@ public partial class MainWindow : Window
 
                 if (!string.IsNullOrWhiteSpace(cleaned))
                 {
-                    // Brief pause so any overlay/UI focus change settles before we touch the target window
+                    // Brief pause so the overlay/UI focus change settles before sending Ctrl+V
                     await Task.Delay(150);
 
-                    // Restore focus to the window that was active when recording started.
-                    if (_recordingStartForegroundWindow != IntPtr.Zero)
-                    {
-                        DebugRecorder.Log("INJ", "Restoring focus to the window active at recording start");
-                        try
-                        {
-                            SetForegroundWindow(_recordingStartForegroundWindow);
-                            await Task.Delay(100);
-                        }
-                        catch (Exception ex)
-                        {
-                            DebugRecorder.Log("INJ", $"SetForegroundWindow failed: {ex.Message}");
-                        }
-                    }
-
-                    // Always copy to clipboard so the user can paste even if injection misses the target
+                    // Always copy to clipboard so the user can paste manually if auto-paste misses
                     await SetClipboardTextAsync(cleaned);
 
-                    // Only send keystrokes if Copy-Only mode is OFF
-                    if (!_copyOnly)
-                        await TextInjector.InjectTextAsync(cleaned);
+                    // Send the user's configured paste shortcut to whatever window is currently active
+                    if (_autoPaste)
+                    {
+                        var (ctrl, shift, vKey) = ParsePasteShortcut();
+                        DebugRecorder.Log("INJ", $"Sending paste shortcut Ctrl+{(char)(vKey)} to active window");
+                        TextInjector.SendKeyboardShortcut(ctrl, shift, false, vKey);
+                    }
                 }
 
                 _overlay?.SetDone();
@@ -548,9 +550,25 @@ public partial class MainWindow : Window
         _autoStop = AutoStopChk.IsChecked.GetValueOrDefault(true);
     }
 
-    private void CopyOnlyChk_Checked(object sender, RoutedEventArgs e)
+    private void AutoPasteChk_Checked(object sender, RoutedEventArgs e)
     {
-        _copyOnly = CopyOnlyChk.IsChecked.GetValueOrDefault(false);
+        _autoPaste = AutoPasteChk.IsChecked.GetValueOrDefault(true);
+    }
+
+    private void PasteShortcutBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        // Just validate and update the hint
+        var (_, _, vKey) = ParsePasteShortcut();
+        if (vKey == 0)
+        {
+            PasteShortcutHint.Text = "Invalid shortcut (use Ctrl+Letter or Ctrl+Shift+Letter)";
+            PasteShortcutHint.Foreground = System.Windows.Media.Brushes.Crimson;
+        }
+        else
+        {
+            PasteShortcutHint.Text = $"Paste shortcut after recording";
+            PasteShortcutHint.Foreground = System.Windows.Media.Brushes.Gray;
+        }
     }
 
     private void MicSettingsBtn_Click(object sender, RoutedEventArgs e)

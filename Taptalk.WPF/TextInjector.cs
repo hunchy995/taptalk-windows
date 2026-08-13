@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Windows;
 using IDataObject = System.Windows.IDataObject;
@@ -6,8 +7,8 @@ using Clipboard = System.Windows.Clipboard;
 namespace Taptalk.WPF;
 
 /// <summary>
-/// Injects text into the focused window. Short text → Unicode keystrokes.
-/// Long text → clipboard + Ctrl+V fallback. Preserves clipboard.
+/// Sends keyboard shortcuts and injects text into the focused window.
+/// Auto-paste path: copy to clipboard, then send the configured paste shortcut.
 /// </summary>
 public static class TextInjector
 {
@@ -41,8 +42,33 @@ public static class TextInjector
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
+    /// <summary>Send a raw keyboard shortcut (e.g. Ctrl+V) to the active window.</summary>
+    public static void SendKeyboardShortcut(bool ctrl, bool shift, bool alt, ushort vKey)
+    {
+        var list = new List<INPUT>();
+
+        void KeyDown(ushort vk) => list.Add(new INPUT
+        {
+            type = INPUT_KEYBOARD,
+            ki = new KEYBDINPUT { wVk = vk }
+        });
+        void KeyUp(ushort vk) => list.Add(new INPUT
+        {
+            type = INPUT_KEYBOARD,
+            ki = new KEYBDINPUT { wVk = vk, dwFlags = KEYEVENTF_KEYUP }
+        });
+
+        if (ctrl) KeyDown(0x11); // VK_CONTROL
+        if (shift) KeyDown(0x10); // VK_SHIFT
+        if (alt) KeyDown(0x12); // VK_MENU
+        KeyDown(vKey);
+        KeyUp(vKey);
+        if (alt) KeyUp(0x12);
+        if (shift) KeyUp(0x10);
+        if (ctrl) KeyUp(0x11);
+
+        SendInput((uint)list.Count, list.ToArray(), Marshal.SizeOf<INPUT>());
+    }
 
     public static async Task InjectTextAsync(string text)
     {
@@ -135,13 +161,6 @@ public static class TextInjector
     {
         // Give the target field a moment to receive focus before sending Ctrl+V
         Thread.Sleep(80);
-        var inputs = new INPUT[]
-        {
-            new() { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x11 } },                    // Ctrl down
-            new() { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x56 } },                    // V down
-            new() { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x56, dwFlags = KEYEVENTF_KEYUP } }, // V up
-            new() { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x11, dwFlags = KEYEVENTF_KEYUP } }  // Ctrl up
-        };
-        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        SendKeyboardShortcut(true, false, false, 0x56); // Ctrl + V
     }
 }
