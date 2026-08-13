@@ -29,9 +29,23 @@ After the first build still produced all-blank frames, I checked the official re
 - Audio must stay in **[-1,1]** float range (no ×32768 scaling).
 - Log zero guard value is **2^-24**.
 - Feature output is flattened `[1, 80, T]` directly.
-- Length input formula matches reference: `frames / 8`.
+- Length input formula matches reference: `frames / 8`
 
 **Files:** `Taptalk.Engine.Parakeet/MelScaleFeaturizer.cs`, `Taptalk.Engine.Parakeet/ParakeetEngine.cs`, `Taptalk.Core/VADDetector.cs`, `Taptalk.Core/AudioCapture.cs`, `Taptalk.WPF/MainWindow.xaml.cs`, `README.md`
+
+## 2026-08-13b — length input bug: off by factor of 8
+
+**Symptom:** v1.0.1 still produced 100% blank CTC output even with correct mel pipeline.
+
+**Root cause found in user log:** `Run: 'audio_signal'=[1,80,268] length=33`. The ONNX `length` input was being divided by 8 (subsampled encoder length), but the model expects the **number of mel frames**, i.e. `raw_samples / hop_length = 42720 / 160 = 267`.
+
+**Fix:**
+- `ParakeetEngine.Transcribe` / `TranscribePartial` now pass the raw sample count through to `RunInferenceCore`.
+- `length` = `rawSamples / HopLength`.
+- Feature extractor now masks/zeros the trailing frame and computes instance normalization only over the valid `sample_len / hop_length` frames.
+- Padding switched from reflect to constant zero to exactly match the reference `np.pad(...)` default.
+
+**Build:** v1.0.2
 
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 
