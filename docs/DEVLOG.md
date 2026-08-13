@@ -70,6 +70,18 @@ After the first build still produced all-blank frames, I checked the official re
 
 **Build:** v1.0.4
 
+## 2026-08-13e — Simple auto-paste (no focus management)
+
+**Symptom:** User wants a simpler workflow: after recording, copy to clipboard and immediately paste into whatever is currently selected, without Taptalk trying to manage windows.
+
+**Fix:**
+- Removed focus-restoration logic entirely.
+- Replaced "Copy only" checkbox with "📌 Auto-paste after stop" (default ON).
+- Added configurable "Paste shortcut" text box (default `Ctrl+V`).
+- After recording stops, Taptalk copies the transcription to clipboard and sends the configured paste shortcut to the currently active window.
+
+**Build:** v1.0.5
+
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 
 **Log evidence (the smoking gun):** `Endpoint mic level: 25% (Windows Levels slider)` + `⚠️ Mic input level is only 25%`. The app's diagnostics WORKED — it read the Windows mic Levels slider and found it at 25%. Taptalk is pure passthrough (no AGC) so it hears the TRUE 25% level; Discord/other apps apply their own auto-gain and mask it. User's voice IS present (peak 0.0456, 16x above noise) but attenuated by Windows to 25%.
