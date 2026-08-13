@@ -45,9 +45,10 @@ iscc /DAppDir="..\publish" Taptalk.iss
 
 ### Parakeet (default)
 Download: https://huggingface.co/istupakov/parakeet-ctc-0.6b-onnx
-- File: `model.onnx` (~600MB) — CTC single-file export
-- **Also download `vocab.txt` from the same page** and put it in the SAME folder as `model.onnx` (the app loads it automatically — without it, transcription comes back empty)
-- In the app: Settings → Engine: Parakeet → Browse → select the .onnx file
+- File: **`model.int8.onnx`** (~650MB) — **self-contained quantized model** — select this one
+- **Also download `vocab.txt` from the same page** and put it in the SAME folder as `model.int8.onnx` (the app loads it automatically — without it, transcription comes back empty)
+- ⚠️ Do NOT use the small `model.onnx` (~41MB) unless you also download its external `model.onnx.data` file (~2.4GB); otherwise the model won't load
+- In the app: Settings → Engine: Parakeet → Browse → select `model.int8.onnx`
 
 ### Whisper
 Download any GGML model: https://huggingface.co/ggerganov/whisper.cpp/tree/main

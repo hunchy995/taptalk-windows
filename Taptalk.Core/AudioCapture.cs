@@ -433,18 +433,15 @@ public sealed class AudioCapture : IDisposable
             if (fmt.SampleRate != SampleRate)
                 stream = new WdlResamplingSampleProvider(stream, SampleRate);
 
-            using var outMs = new MemoryStream();
-            var pcm16 = new SampleToWaveProvider16(stream);
-            byte[] buf = new byte[8192];
+            // Read float samples directly — avoid the old float → 16-bit PCM bytes → float roundtrip.
+            var samples = new List<float>();
+            float[] buf = new float[4096];
             int read;
-            while ((read = pcm16.Read(buf, 0, buf.Length)) > 0)
-                outMs.Write(buf, 0, read);
+            while ((read = stream.Read(buf, 0, buf.Length)) > 0)
+                for (int i = 0; i < read; i++)
+                    samples.Add(buf[i]);
 
-            byte[] pcm = outMs.ToArray();
-            var result = new float[pcm.Length / 2];
-            for (int i = 0; i < result.Length; i++)
-                result[i] = BitConverter.ToInt16(pcm, i * 2) / 32768f;
-            return result;
+            return samples.ToArray();
         }
         catch (Exception ex)
         {

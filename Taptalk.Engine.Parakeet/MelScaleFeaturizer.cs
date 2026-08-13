@@ -1,8 +1,9 @@
 namespace Taptalk.Engine.Parakeet;
 
 /// <summary>
-/// Log-Mel spectrogram featurizer for Parakeet ONNX models.
-/// 80 mel bands, 25ms window, 10ms hop, 512-point FFT, Hann window.
+/// Log-Mel spectrogram featurizer for NVIDIA Parakeet (NeMo) ONNX models.
+/// 80 mel bands, 25ms window, 10ms hop, 512-point FFT, Hann window,
+/// pre-emphasis, and per-feature instance normalization.
 /// </summary>
 public sealed class MelScaleFeaturizer
 {
@@ -11,6 +12,17 @@ public sealed class MelScaleFeaturizer
     public const int HopSize = 160;     // 10ms
     public const int WindowSize = 400;  // 25ms
     public const int MelBins = 80;
+
+    /// <summary>
+    /// NeMo models are trained on 16-bit PCM scaled to the original integer range.
+    /// Scaling before STFT aligns the log-mel energies with the training distribution.
+    /// </summary>
+    public const float NeMoScale = 32768.0f;
+
+    /// <summary>
+    /// Pre-emphasis coefficient. Standard value for ASR front-ends.
+    /// </summary>
+    public const float PreEmphasis = 0.97f;
 
     private readonly double[][] _melFilters;
     private readonly float[] _hannWindow;
@@ -64,32 +76,42 @@ public sealed class MelScaleFeaturizer
     }
 
     /// <summary>
-    /// Extract log-mel features. Returns [melBins, numFrames] float array (transposed for ONNX [1,80,T]).
+    /// Extract NeMo-compatible log-mel features.
+    /// Returns [melBins, numFrames] float array (transposed for ONNX [1,80,T]).
     /// </summary>
     public float[,] Extract(float[] pcm)
     {
         int numFrames = Math.Max(0, (pcm.Length - WindowSize) / HopSize + 1);
         Taptalk.Core.DebugRecorder.Log("FEAT", $"Extract: {pcm.Length} samples ({pcm.Length / (float)SampleRate:F2}s) → frames={numFrames}");
-        var features = new float[MelBins, numFrames];
 
+        if (numFrames == 0) return new float[MelBins, 0];
+
+        var features = new float[MelBins, numFrames];
         var real = new float[FftSize];
         var imag = new float[FftSize];
+        var power = new float[FftSize / 2 + 1];
 
+        // Pre-emphasize and scale on the fly while copying windowed samples.
+        // We keep a local previous-sample variable; the first sample of each
+        // frame still gets the previous raw sample from the original waveform.
         for (int frame = 0; frame < numFrames; frame++)
         {
             int start = frame * HopSize;
 
-            // Apply Hann window
             Array.Clear(real);
             Array.Clear(imag);
-            for (int i = 0; i < WindowSize; i++)
-                real[i] = pcm[start + i] * _hannWindow[i];
 
-            // Simple radix-2 FFT (size 512)
+            for (int i = 0; i < WindowSize; i++)
+            {
+                float sample = pcm[start + i];
+                if (i > 0)
+                    sample -= PreEmphasis * pcm[start + i - 1];
+                real[i] = sample * NeMoScale * _hannWindow[i];
+            }
+
             FFT(real, imag, FftSize);
 
             // Power spectrum
-            var power = new float[FftSize / 2 + 1];
             for (int i = 0; i < power.Length; i++)
                 power[i] = real[i] * real[i] + imag[i] * imag[i];
 
@@ -97,12 +119,45 @@ public sealed class MelScaleFeaturizer
             for (int m = 0; m < MelBins; m++)
             {
                 double sum = 0;
+                var filter = _melFilters[m];
                 for (int j = 0; j < power.Length; j++)
-                    sum += power[j] * _melFilters[m][j];
+                    sum += power[j] * filter[j];
                 features[m, frame] = (float)Math.Log(Math.Max(sum, 1e-5));
             }
         }
+
+        // Per-feature instance normalization across time (NeMo default normalize=True).
+        NormalizePerFeature(features);
+
         return features;
+    }
+
+    /// <summary>
+    /// For each mel band compute mean/std across all frames, then z-score.
+    /// </summary>
+    private static void NormalizePerFeature(float[,] features)
+    {
+        int bins = features.GetLength(0);
+        int frames = features.GetLength(1);
+        if (frames == 0) return;
+
+        for (int b = 0; b < bins; b++)
+        {
+            double sum = 0;
+            for (int f = 0; f < frames; f++) sum += features[b, f];
+            double mean = sum / frames;
+
+            double sq = 0;
+            for (int f = 0; f < frames; f++)
+            {
+                double d = features[b, f] - mean;
+                sq += d * d;
+            }
+            double std = Math.Sqrt(sq / frames) + 1e-5;
+
+            for (int f = 0; f < frames; f++)
+                features[b, f] = (float)((features[b, f] - mean) / std);
+        }
     }
 
     private static void FFT(float[] real, float[] imag, int n)

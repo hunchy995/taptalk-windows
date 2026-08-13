@@ -1,3 +1,27 @@
+## 2026-08-13 — Parakeet "records nothing" fix: NeMo preprocessing + VAD performance + model detection
+
+**Symptom:** User reports "everytime I record it records nothing" with Parakeet ONNX on AMD Radeon GPU.
+
+**Root causes identified (coding-partner verified):**
+1. **NeMo audio preprocessing mismatch.** Parakeet was trained with NVIDIA NeMo pipeline expecting:
+   - Audio scaled to the 16-bit integer range (×32768) before STFT/Mel
+   - Pre-emphasis filter (coefficient 0.97)
+   - Per-feature instance normalization across time
+   The old code fed [-1,1] floats with none of these steps, producing log-mel features far outside the training distribution → 100% CTC blank tokens → empty transcript.
+2. **VAD O(N²) performance leak.** `CheckVadCore()` called `_capture.GetSnapshot()` on every audio callback, resampling the entire ever-growing recording buffer each time. This could starve the audio thread and make capture appear dead.
+3. **Redundant audio type thrashing.** `GetSnapshot()` converted native float → 16-bit PCM bytes → float. Now reads float samples directly from `ISampleProvider`.
+4. **Wrong model file selection.** README pointed to `model.onnx` (~41MB) which requires external `model.onnx.data` (~2.4GB). The self-contained file is `model.int8.onnx` (~650MB). Added size detection + warning in `LoadModel()` and updated README.
+5. **Silent DirectML INT8 failure on AMD.** Added feature-tensor and logit statistics (min/max/mean/NaN) to the debug log so the user can verify whether DirectML is producing valid output.
+
+**Fixes applied:**
+- `MelScaleFeaturizer.Extract()`: scale to 32768, pre-emphasis 0.97, per-feature z-score normalization.
+- `VADDetector`: added `Check(float rms, int nowMs)` overload for streaming chunks; `MainWindow.CheckVadCore()` now uses the incoming chunk instead of `GetSnapshot()`.
+- `AudioCapture.GetSnapshot()`: direct float read, no short PCM roundtrip.
+- `ParakeetEngine.LoadModel()`: warns if model file <100MB and missing `.data` file.
+- `ParakeetEngine.Transcribe()` + `RunInferenceCore()`: logs feature tensor stats and logit min/max/NaN.
+- `README.md`: explicitly instructs users to download `model.int8.onnx` and `vocab.txt`.
+
+**Files:** `Taptalk.Engine.Parakeet/MelScaleFeaturizer.cs`, `Taptalk.Engine.Parakeet/ParakeetEngine.cs`, `Taptalk.Core/VADDetector.cs`, `Taptalk.Core/AudioCapture.cs`, `Taptalk.WPF/MainWindow.xaml.cs`, `README.md`
 
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 

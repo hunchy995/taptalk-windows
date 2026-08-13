@@ -12,6 +12,7 @@ public sealed class VADDetector
 
     private long _silenceStartMs;
     private int _lastSampleCount;
+    private int _lastCheckMs;
     private readonly AudioCapture _capture;
 
     public VADDetector(AudioCapture capture) => _capture = capture;
@@ -26,14 +27,28 @@ public sealed class VADDetector
         return (float)Math.Sqrt(sumSq / Math.Max(1, audio.Length - start));
     }
 
-    /// <summary>Call every ~250ms while recording. Returns true when silence threshold exceeded.</summary>
+    /// <summary>
+    /// Call every ~250ms while recording. Returns true when silence threshold exceeded.
+    /// Legacy overload that computes RMS from the full audio buffer (used for full-snapshot checks).
+    /// </summary>
     public bool Check(float[] audio, int nowMs)
     {
         var total = audio.Length;
         if (total < _lastSampleCount + 2000) return false; // not enough new audio
         _lastSampleCount = total;
+        return Check(GetRMS(audio), nowMs);
+    }
 
-        var rms = GetRMS(audio);
+    /// <summary>
+    /// Preferred overload for streaming chunks. Caller computes RMS from the incoming chunk;
+    /// this avoids expensive GetSnapshot() calls on every callback.
+    /// </summary>
+    public bool Check(float rms, int nowMs)
+    {
+        // Don't allow checks more often than ~100ms to avoid jitter from a single quiet chunk.
+        if (nowMs - _lastCheckMs < 100) return false;
+        _lastCheckMs = nowMs;
+
         if (rms < SilenceThreshold)
         {
             if (_silenceStartMs == 0)
@@ -52,5 +67,6 @@ public sealed class VADDetector
     {
         _silenceStartMs = 0;
         _lastSampleCount = 0;
+        _lastCheckMs = 0;
     }
 }

@@ -54,7 +54,22 @@ public sealed class ParakeetEngine : ISttEngine
 
     public bool LoadModel(string modelPath)
     {
-        DebugRecorder.Log("INF", $"Loading Parakeet model: {modelPath} ({new FileInfo(modelPath).Length / 1e6:F0}MB)");
+        var fileInfo = new FileInfo(modelPath);
+        DebugRecorder.Log("INF", $"Loading Parakeet model: {modelPath} ({fileInfo.Length / 1e6:F0}MB)");
+
+        if (fileInfo.Length < 100_000_000)
+        {
+            string dataPath = modelPath + ".data";
+            if (!File.Exists(dataPath))
+            {
+                DebugRecorder.Log("INF", $"⚠️ Model file is only {fileInfo.Length / 1e6:F1}MB and missing external data file '{dataPath}'. This is the split model. Use the self-contained model.int8.onnx (~650MB) instead.");
+            }
+            else
+            {
+                DebugRecorder.Log("INF", $"External model data found: {dataPath} ({new FileInfo(dataPath).Length / 1e9:F2}GB).");
+            }
+        }
+
         try
         {
             // Try DirectML (GPU) first — works on AMD Radeon/NVIDIA/Intel
@@ -137,6 +152,11 @@ public sealed class ParakeetEngine : ISttEngine
 
         var normalized = NormalizeForInference(audio, isPartial: false);
         var features = _featurizer.Extract(normalized);
+
+        // Sanity-check the feature tensor to catch silent preprocessing failures
+        FeatureStats(features, out float featMin, out float featMax, out float featMean);
+        DebugRecorder.Log("FEAT", $"Feature tensor min={featMin:F2} max={featMax:F2} mean={featMean:F2}");
+
         return RunInference(features);
     }
 
@@ -146,6 +166,22 @@ public sealed class ParakeetEngine : ISttEngine
         var normalized = NormalizeForInference(audio, isPartial: true);
         var features = _featurizer.Extract(normalized);
         return RunInference(features);
+    }
+
+    private static void FeatureStats(float[,] features, out float min, out float max, out float mean)
+    {
+        min = float.MaxValue; max = float.MinValue; double sum = 0;
+        int rows = features.GetLength(0), cols = features.GetLength(1);
+        int n = rows * cols;
+        for (int i = 0; i < rows; i++)
+            for (int j = 0; j < cols; j++)
+            {
+                var v = features[i, j];
+                if (v < min) min = v;
+                if (v > max) max = v;
+                sum += v;
+            }
+        mean = n > 0 ? (float)(sum / n) : 0f;
     }
 
     public void ResetSession() => _sessionGain = 1.0f;
@@ -234,9 +270,21 @@ public sealed class ParakeetEngine : ISttEngine
         // [1, T, vocab] typical for CTC models
         long T = shape.Length >= 2 ? shape[^2] : 1;
         long V = shape.Length >= 1 ? shape[^1] : 1;
-        DebugRecorder.Log("INF", $"Inference done in {sw.ElapsedMilliseconds}ms. Output shape=[{string.Join(",", shape)}]");
 
         var logits = output.GetTensorDataAsSpan<float>().ToArray(); // copy NOW — span dangles after results.Dispose()
+
+        // Diagnostics: detect NaN / all-blank output to flag AMD DirectML INT8 issues
+        bool hasNaN = false;
+        float minLogit = float.MaxValue, maxLogit = float.MinValue;
+        for (int i = 0; i < logits.Length; i++)
+        {
+            var v = logits[i];
+            if (float.IsNaN(v)) hasNaN = true;
+            if (v < minLogit) minLogit = v;
+            if (v > maxLogit) maxLogit = v;
+        }
+
+        DebugRecorder.Log("INF", $"Inference done in {sw.ElapsedMilliseconds}ms. Output shape=[{string.Join(",", shape)}] logits min={minLogit:F2} max={maxLogit:F2} hasNaN={hasNaN}");
         var tokens = new List<int>();
         for (int t = 0; t < (int)T; t++)
         {

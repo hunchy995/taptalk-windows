@@ -228,13 +228,17 @@ public partial class MainWindow : Window
     {
         if (_state != RecordingState.Recording) return;
 
-        // Watchdog: recording but almost no audio for 2.5s → likely muted/blocked mic
-        if (!_warnedNoAudio && _sessionTimer.ElapsedMilliseconds > 2500 && _capture.TotalSamples < 4000)
+        // Watchdog: recording but almost no audio for 2.5s → likely muted/blocked mic.
+        // chunk[] is the latest native-format samples; compute its peak cheaply for diagnostics.
+        float peak = 0f;
+        foreach (var v in chunk) { var a = MathF.Abs(v); if (a > peak) peak = a; }
+
+        if (!_warnedNoAudio && _sessionTimer.ElapsedMilliseconds > 2500 && (peak < 0.001f || _capture.TotalSamples < 4000))
         {
             _warnedNoAudio = true;
             Dispatcher.BeginInvoke(() =>
             {
-                Log("⚠️ No audio detected — check your physical microphone mute button.");
+                Log("⚠️ No audio detected — check your physical microphone mute button or Windows mic level.");
                 MicStatusText.Text = "No audio data is reaching Taptalk. Verify your mic input levels.";
             });
         }
@@ -242,7 +246,10 @@ public partial class MainWindow : Window
         if (!_autoStop) return;
         if (_sessionTimer.ElapsedMilliseconds < 1500) return;
 
-        if (_vad.Check(_capture.GetSnapshot(), (int)_sessionTimer.ElapsedMilliseconds))
+        // Use the incoming native-rate chunk for VAD — never resample the whole growing
+        // buffer here. That was an O(N^2) performance leak that could starve the audio thread.
+        var rms = _vad.GetRMS(chunk);
+        if (_vad.Check(rms, (int)_sessionTimer.ElapsedMilliseconds))
         {
             DebugRecorder.Log("VAD", $"Silence limit reached at {_sessionTimer.ElapsedMilliseconds}ms — auto-stop");
             // Marshal the stop back to the UI thread — NEVER stop NAudio from its own callback
