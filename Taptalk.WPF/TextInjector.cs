@@ -6,8 +6,8 @@ using System.Windows;
 namespace Taptalk.WPF;
 
 /// <summary>
-/// Types text into the currently focused window using fake Unicode keystrokes.
-/// No clipboard, no paste shortcut, no focus management.
+/// Types text into a target window using fake Unicode keystrokes.
+/// Focus is restored by the caller before calling InjectText.
 /// </summary>
 public static class TextInjector
 {
@@ -38,11 +38,14 @@ public static class TextInjector
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 
-    /// <summary>Type the transcription directly into whatever window currently has focus.</summary>
-    public static void InjectText(string text)
+    /// <summary>Type the transcription into the focused window. If a target handle is provided, focus is restored first.</summary>
+    public static void InjectText(string text, IntPtr targetHwnd)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -50,7 +53,22 @@ public static class TextInjector
             return;
         }
 
-        string target = GetForegroundWindowTitle();
+        string target = "Unknown";
+        try
+        {
+            if (targetHwnd != IntPtr.Zero)
+            {
+                SetForegroundWindow(targetHwnd);
+                var sb = new StringBuilder(256);
+                if (GetWindowText(targetHwnd, sb, 256) > 0) target = sb.ToString();
+            }
+            else
+            {
+                target = GetForegroundWindowTitle();
+            }
+        }
+        catch { }
+
         Taptalk.Core.DebugRecorder.Log("INJ", $"Typing {text.Length} chars into active window '{target}': \"{text}\"");
         SendUnicodeKeys(text);
         Taptalk.Core.DebugRecorder.Log("INJ", "Typing complete");
