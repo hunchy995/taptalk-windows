@@ -104,6 +104,19 @@ After the first build still produced all-blank frames, I checked the official re
 
 **Build:** v1.0.7
 
+## 2026-08-13h — Restore focus before typing + real keyboard simulation
+
+**Symptom:** SendInput with Unicode events (`KEYEVENTF_UNICODE`) produced no visible text in Chrome/Edge. Chrome and other modern apps ignore pure Unicode injection. Also, focus shifted during recording so keystrokes went to the wrong window.
+
+**Fix:**
+- Switched to **real keyboard simulation** using `VkKeyScanExW` + `MapVirtualKeyExW` to send the correct virtual-key + scan-code events.
+- This mimics a real keyboard, which Chrome, Edge, Word, Notepad, and standard controls accept.
+- Unicode events are kept only as fallback for characters with no keyboard mapping (emoji, etc.).
+- On recording start, Taptalk captures the window that had focus (after a 50ms settle).
+- After stop, it calls `SetForegroundWindow` back to that captured window before typing.
+
+**Build:** v1.0.8
+
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 
 **Log evidence (the smoking gun):** `Endpoint mic level: 25% (Windows Levels slider)` + `⚠️ Mic input level is only 25%`. The app's diagnostics WORKED — it read the Windows mic Levels slider and found it at 25%. Taptalk is pure passthrough (no AGC) so it hears the TRUE 25% level; Discord/other apps apply their own auto-gain and mask it. User's voice IS present (peak 0.0456, 16x above noise) but attenuated by Windows to 25%.

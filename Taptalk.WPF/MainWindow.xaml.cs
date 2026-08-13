@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -41,10 +42,10 @@ public partial class MainWindow : Window
     private bool _isPartialTranscribing;
     private bool _warnedNoAudio;
     private DateTime _lastTapTime = DateTime.MinValue;
-
+    private IntPtr _recordingStartForegroundWindow = IntPtr.Zero;
+    private System.Windows.Threading.DispatcherTimer? _partialTimer;
     private DateTime _lastPartial = DateTime.MinValue;
     private string _lastPartialText = "";
-    private System.Windows.Threading.DispatcherTimer? _partialTimer;
 
     public MainWindow()
     {
@@ -182,6 +183,21 @@ public partial class MainWindow : Window
         _vad.Reset();
         _sessionTimer.Restart();
         _engine?.ResetSession(); // fresh session gain for this recording
+
+        // Remember which window had focus before we started, so we can type back into it after stop.
+        // Give any brief focus shift from the hotkey a moment to settle.
+        _recordingStartForegroundWindow = IntPtr.Zero;
+        Task.Delay(50).ContinueWith(_ =>
+        {
+            _recordingStartForegroundWindow = GetForegroundWindow();
+            try
+            {
+                var sb = new System.Text.StringBuilder(256);
+                if (GetWindowText(_recordingStartForegroundWindow, sb, 256) > 0)
+                    DebugRecorder.Log("REC", $"Captured focus window: '{sb}'");
+            }
+            catch { }
+        }, TaskScheduler.Default);
 
         try
         {
@@ -347,8 +363,8 @@ public partial class MainWindow : Window
 
                     if (_autoPaste)
                     {
-                        // Type directly into the active field — never depend on the clipboard.
-                        TextInjector.InjectText(cleaned);
+                        // Type back into the window that was focused when recording started.
+                        TextInjector.InjectText(cleaned, _recordingStartForegroundWindow);
                     }
                 }
 
@@ -634,4 +650,12 @@ public partial class MainWindow : Window
         _engine?.Dispose();
         _overlay?.Close();
     }
+
+    // ---------- Win32 focus helpers ----------
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 }
