@@ -7,13 +7,13 @@ namespace Taptalk.Engine.Parakeet;
 ///
 /// Pipeline:
 /// 1. Pre-emphasis (coefficient 0.97) on [-1,1] float waveform
-/// 2. Reflect/Symmetric pad by n_fft/2 on both sides
+/// 2. Constant zero pad by n_fft/2 on both sides (matches np.pad default)
 /// 3. 512-point FFT with a 400-point Hann window zero-padded to 512
 /// 4. Slaney mel scale filterbank (80 bands) with Slaney bandwidth normalization
 /// 5. log(mel + 2^-24)
-/// 6. Per-feature instance normalization across time (zero-mean / std)
+/// 6. Per-feature instance normalization across valid frames (zero-mean / std)
 ///
-/// Output layout: [batch=1, melBins=80, frames]
+/// Output layout: flattened [1, 80, frames]
 /// </summary>
 public sealed class MelScaleFeaturizer
 {
@@ -27,15 +27,14 @@ public sealed class MelScaleFeaturizer
 
     private readonly float[] _window = new float[FftSize];
     private readonly float[,] _melFilterbank; // [257, 80]
-    private readonly float[] _hann400;
 
     public MelScaleFeaturizer()
     {
         // 400-point symmetric Hann window, then zero-pad to 512 (centered).
-        _hann400 = CreateHannWindow(WindowSize);
+        var hann400 = CreateHannWindow(WindowSize);
         int pad = (FftSize - WindowSize) / 2; // 56
         for (int i = 0; i < WindowSize; i++)
-            _window[pad + i] = _hann400[i];
+            _window[pad + i] = hann400[i];
 
         _melFilterbank = BuildSlaneyMelFilterbank(
             nFreqs: FftSize / 2 + 1,
@@ -49,32 +48,22 @@ public sealed class MelScaleFeaturizer
     /// <summary>Convert mono 16kHz float PCM (range roughly [-1,1]) to NeMo log-mel features.</summary>
     public float[] Extract(float[] waveform)
     {
-        if (waveform == null || waveform.Length < HopLength)
+        if (waveform == null || waveform.Length < WindowSize)
             return Array.Empty<float>();
 
-        // 1. Pre-emphasis
+        // 1. Pre-emphasis: x[t] - 0.97 * x[t-1], with x[-1] = 0
         float[] pcm = new float[waveform.Length];
         pcm[0] = waveform[0];
         for (int i = 1; i < waveform.Length; i++)
             pcm[i] = waveform[i] - Preemphasis * waveform[i - 1];
 
-        // 2. Pad by FftSize/2 on each side (same as reference np.pad(..., n_fft//2))
+        // 2. Constant zero pad by FftSize/2 on each side (matches reference np.pad default)
         int pad = FftSize / 2;
         int paddedLen = pcm.Length + 2 * pad;
         float[] padded = new float[paddedLen];
-        // Left reflect pad
-        for (int i = 0; i < pad; i++)
-            padded[i] = pcm[Math.Min(i, pcm.Length - 1)];
-        // Original
         Array.Copy(pcm, 0, padded, pad, pcm.Length);
-        // Right reflect pad
-        for (int i = 0; i < pad; i++)
-        {
-            int src = pcm.Length - 1 - i;
-            padded[pad + pcm.Length + i] = src >= 0 ? pcm[src] : 0f;
-        }
 
-        // 3. Frames: number of full windows after padding
+        // 3. Number of frames after padding (reference produces len/hop + 1 and masks last)
         int frames = (paddedLen - FftSize) / HopLength + 1;
         if (frames <= 0) return Array.Empty<float>();
 
@@ -93,48 +82,55 @@ public sealed class MelScaleFeaturizer
 
             Fft(real, imag, FftSize);
 
-            // Power spectrum bins 0..257
             for (int m = 0; m < MelBands; m++)
             {
-                float melEnergy = 0f;
+                double melEnergy = 0.0;
                 for (int b = 0; b < FftSize / 2 + 1; b++)
                 {
-                    float power = real[b] * real[b] + imag[b] * imag[b];
+                    double power = real[b] * real[b] + imag[b] * imag[b];
                     melEnergy += power * _melFilterbank[b, m];
                 }
-                logMel[t, m] = MathF.Log(Math.Max(melEnergy, 0f) + LogZeroGuard);
+                logMel[t, m] = (float)Math.Log(Math.Max(melEnergy, 0.0) + LogZeroGuard);
             }
         }
 
-        // 5. Per-feature instance normalization across time (match reference)
+        // 5. Per-feature instance normalization across valid frames.
+        // Valid length in frames equals waveform_len // hop_length (reference).
+        int validFrames = waveform.Length / HopLength;
+        if (validFrames <= 0) validFrames = frames;
+        if (validFrames > frames) validFrames = frames;
+
         float[] means = new float[MelBands];
         float[] vars = new float[MelBands];
         for (int m = 0; m < MelBands; m++)
         {
             double sum = 0;
-            for (int t = 0; t < frames; t++) sum += logMel[t, m];
-            means[m] = (float)(sum / frames);
+            for (int t = 0; t < validFrames; t++) sum += logMel[t, m];
+            means[m] = (float)(sum / validFrames);
 
             double sq = 0;
-            for (int t = 0; t < frames; t++)
+            for (int t = 0; t < validFrames; t++)
             {
                 float d = logMel[t, m] - means[m];
                 sq += d * d;
             }
-            vars[m] = (float)(sq / Math.Max(1, frames - 1));
+            vars[m] = (float)(sq / Math.Max(1, validFrames - 1));
         }
 
-        // 6. Transpose to [1, MelBands, frames]
+        // 6. Transpose to [1, MelBands, frames] and normalize only valid frames; leave padding frames as-is
         float[] features = new float[1 * MelBands * frames];
         int idx = 0;
         for (int m = 0; m < MelBands; m++)
             for (int t = 0; t < frames; t++)
-                features[idx++] = (logMel[t, m] - means[m]) / (MathF.Sqrt(vars[m]) + 1e-5f);
+            {
+                float v = t < validFrames ? (logMel[t, m] - means[m]) / (MathF.Sqrt(vars[m]) + 1e-5f) : 0f;
+                features[idx++] = v;
+            }
 
         return features;
     }
 
-    /// <summary>Number of frames this waveform produces.</summary>
+    /// <summary>Number of valid frames this waveform produces (matches reference length formula).</summary>
     public int FrameCount(int sampleCount) => sampleCount > 0 ? (sampleCount / HopLength) : 0;
 
     private static float[] CreateHannWindow(int size)
@@ -148,10 +144,6 @@ public sealed class MelScaleFeaturizer
     private static float[,] BuildSlaneyMelFilterbank(int nFreqs, float fMin, float fMax, int nMels, int sampleRate, bool norm)
     {
         // Slaney mel scale (matches torchaudio/librosa / onnx-asr reference)
-        float[] allFreqs = new float[nFreqs];
-        for (int i = 0; i < nFreqs; i++)
-            allFreqs[i] = i * (sampleRate / 2f) / (nFreqs - 1);
-
         double mMin = HzToMel(fMin);
         double mMax = HzToMel(fMax);
         double[] mPts = new double[nMels + 2];
@@ -162,7 +154,6 @@ public sealed class MelScaleFeaturizer
         for (int i = 0; i < nMels + 2; i++)
             hzPts[i] = MelToHz(mPts[i]);
 
-        // Convert hzPts to frequency-bin indices (slaney-style)
         int[] bins = new int[nMels + 2];
         for (int i = 0; i < nMels + 2; i++)
             bins[i] = (int)Math.Floor((nFreqs - 1) * hzPts[i] / (sampleRate / 2.0));
@@ -183,7 +174,6 @@ public sealed class MelScaleFeaturizer
 
         if (norm)
         {
-            // Slaney norm: 2 / (f_upper - f_lower) for each filter
             for (int i = 0; i < nMels; i++)
             {
                 double width = hzPts[i + 2] - hzPts[i];

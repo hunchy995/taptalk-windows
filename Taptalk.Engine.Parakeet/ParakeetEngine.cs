@@ -145,18 +145,19 @@ public sealed class ParakeetEngine : ISttEngine
 
         var normalized = NormalizeForInference(audio, isPartial: false);
         var features = _featurizer.Extract(normalized);
+        int rawSamples = normalized.Length;
 
         FeatureStats(features, out float featMin, out float featMax, out float featMean);
         DebugRecorder.Log("FEAT", $"Feature tensor min={featMin:F2} max={featMax:F2} mean={featMean:F2}");
 
-        return RunInference(features);
+        return RunInference(features, rawSamples);
     }
 
     public string TranscribePartial(float[] audio)
     {
         var normalized = NormalizeForInference(audio, isPartial: true);
         var features = _featurizer.Extract(normalized);
-        return RunInference(features);
+        return RunInference(features, normalized.Length);
     }
 
     private static void FeatureStats(float[] features, out float min, out float max, out float mean)
@@ -195,13 +196,13 @@ public sealed class ParakeetEngine : ISttEngine
         return copy;
     }
 
-    private string RunInference(float[] features)
+    private string RunInference(float[] features, int rawSamples)
     {
         if (_isDisposed) throw new ObjectDisposedException(nameof(ParakeetEngine));
         _runGate.Wait();
         try
         {
-            return RunInferenceCore(features);
+            return RunInferenceCore(features, rawSamples);
         }
         finally
         {
@@ -209,7 +210,7 @@ public sealed class ParakeetEngine : ISttEngine
         }
     }
 
-    private string RunInferenceCore(float[] features)
+    private string RunInferenceCore(float[] features, int rawSamples)
     {
         int total = features.Length;
         if (total == 0 || total % MelScaleFeaturizer.MelBands != 0)
@@ -225,15 +226,15 @@ public sealed class ParakeetEngine : ISttEngine
 
         var inputs = new Dictionary<string, OrtValue> { [_inputName] = inputTensor };
         OrtValue? lenTensor = null;
+        long length = Math.Max(1, rawSamples / (long)MelScaleFeaturizer.HopLength);
         if (_hasLengthInput)
         {
-            long len = Math.Max(1, frames / 8);
-            lenTensor = OrtValue.CreateTensorValueFromMemory(new long[] { len }, new long[] { 1 });
+            lenTensor = OrtValue.CreateTensorValueFromMemory(new long[] { length }, new long[] { 1 });
             inputs["length"] = lenTensor;
         }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        DebugRecorder.Log("INF", $"Run: '{_inputName}'=[1,{melBins},{frames}] length={(_hasLengthInput ? (frames / 8).ToString() : "n/a")} → outputs=[{string.Join(",", _outputNames)}]");
+        DebugRecorder.Log("INF", $"Run: '{_inputName}'=[1,{melBins},{frames}] length={length} → outputs=[{string.Join(",", _outputNames)}]");
 
         using var results = _session!.Run(_runOptions, inputs, _outputNames);
         sw.Stop();
