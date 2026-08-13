@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using Microsoft.Win32;
 using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
@@ -46,6 +47,7 @@ public partial class MainWindow : Window
     private DateTime _lastPartial = DateTime.MinValue;
     private string _lastPartialText = "";
     private System.Windows.Threading.DispatcherTimer? _partialTimer;
+    private IntPtr _recordingStartForegroundWindow = IntPtr.Zero;
 
     public MainWindow()
     {
@@ -54,6 +56,12 @@ public partial class MainWindow : Window
         Loaded += OnLoaded;
         Closing += OnClosing;
     }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
     {
@@ -180,6 +188,11 @@ public partial class MainWindow : Window
         _vad.Reset();
         _sessionTimer.Restart();
         _engine?.ResetSession(); // fresh session gain for this recording
+
+        // Remember which window had focus when the user started recording.
+        // We will restore this window before typing/pasting the final text.
+        try { _recordingStartForegroundWindow = GetForegroundWindow(); }
+        catch { _recordingStartForegroundWindow = IntPtr.Zero; }
 
         try
         {
@@ -340,6 +353,24 @@ public partial class MainWindow : Window
 
                 if (!string.IsNullOrWhiteSpace(cleaned))
                 {
+                    // Brief pause so any overlay/UI focus change settles before we touch the target window
+                    await Task.Delay(150);
+
+                    // Restore focus to the window that was active when recording started.
+                    if (_recordingStartForegroundWindow != IntPtr.Zero)
+                    {
+                        DebugRecorder.Log("INJ", "Restoring focus to the window active at recording start");
+                        try
+                        {
+                            SetForegroundWindow(_recordingStartForegroundWindow);
+                            await Task.Delay(100);
+                        }
+                        catch (Exception ex)
+                        {
+                            DebugRecorder.Log("INJ", $"SetForegroundWindow failed: {ex.Message}");
+                        }
+                    }
+
                     // Always copy to clipboard so the user can paste even if injection misses the target
                     await SetClipboardTextAsync(cleaned);
 
@@ -369,20 +400,26 @@ public partial class MainWindow : Window
         _sessionTimer.Reset();
     }
 
-    /// <summary>Set clipboard text from a background thread without touching STA UI clipboard directly.</summary>
+    /// <summary>Set clipboard text from a background thread without touching STA UI clipboard directly. Retries if busy.</summary>
     private async Task SetClipboardTextAsync(string text)
     {
-        await Dispatcher.InvokeAsync(() =>
+        await Dispatcher.InvokeAsync(async () =>
         {
-            try
+            for (int attempt = 0; attempt < 10; attempt++)
             {
-                Clipboard.SetText(text);
-                DebugRecorder.Log("INJ", $"Copied to clipboard: \"{text}\"");
+                try
+                {
+                    Clipboard.SetText(text);
+                    DebugRecorder.Log("INJ", $"Copied to clipboard (attempt {attempt + 1}): \"{text}\"");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    DebugRecorder.Log("INJ", $"Clipboard attempt {attempt + 1} failed: {ex.Message}");
+                    await Task.Delay(50);
+                }
             }
-            catch (Exception ex)
-            {
-                DebugRecorder.Log("INJ", $"Clipboard copy failed: {ex.Message}");
-            }
+            DebugRecorder.Log("INJ", "Clipboard copy failed after 10 attempts");
         });
     }
 

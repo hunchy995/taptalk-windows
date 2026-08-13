@@ -41,6 +41,9 @@ public static class TextInjector
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
     public static async Task InjectTextAsync(string text)
     {
         if (string.IsNullOrEmpty(text))
@@ -62,7 +65,7 @@ public static class TextInjector
         }
         catch { }
 
-        if (text.Length < 30)
+        if (text.Length < 50)
         {
             Taptalk.Core.DebugRecorder.Log("INJ", $"SendInput → '{target}' | chars={text.Length} | text=\"{text}\"");
             SendUnicodeKeys(text);
@@ -100,29 +103,38 @@ public static class TextInjector
         IDataObject? current = null;
         try { current = Clipboard.GetDataObject(); } catch { /* clipboard busy */ }
 
-        try
+        for (int attempt = 0; attempt < 10; attempt++)
         {
-            Clipboard.SetText(text);
-            SendPaste();
-            await Task.Delay(120);
-        }
-        catch
-        {
-            // Clipboard failed — fall back to keystrokes
-            SendUnicodeKeys(text);
-        }
-        finally
-        {
-            if (current != null)
+            try
             {
-                await Task.Delay(80);
-                try { Clipboard.SetDataObject(current); } catch { }
+                Clipboard.SetText(text);
+                SendPaste();
+                await Task.Delay(120);
+                break; // success
             }
+            catch
+            {
+                if (attempt == 9)
+                {
+                    // Clipboard failed repeatedly — fall back to keystrokes
+                    SendUnicodeKeys(text);
+                    break;
+                }
+                await Task.Delay(50);
+            }
+        }
+
+        if (current != null)
+        {
+            await Task.Delay(80);
+            try { Clipboard.SetDataObject(current); } catch { }
         }
     }
 
     private static void SendPaste()
     {
+        // Give the target field a moment to receive focus before sending Ctrl+V
+        Thread.Sleep(80);
         var inputs = new INPUT[]
         {
             new() { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x11 } },                    // Ctrl down
