@@ -47,6 +47,17 @@ After the first build still produced all-blank frames, I checked the official re
 
 **Build:** v1.0.2
 
+## 2026-08-13c — Clipboard copy + Copy-only mode
+
+**Symptom:** Transcription works, but text is not reliably injected into the target field and is not available on the clipboard.
+
+**Fix:**
+- Final cleaned transcription is always copied to the Windows clipboard after recording stops.
+- Added a "📋 Copy only" checkbox: when checked, Taptalk skips `SendInput` keystroke injection and only copies the text to the clipboard (user pastes with `Ctrl+V`).
+- Resolved `Clipboard` ambiguity between `System.Windows.Clipboard` and `System.Windows.Forms.Clipboard`.
+
+**Build:** v1.0.3
+
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 
 **Log evidence (the smoking gun):** `Endpoint mic level: 25% (Windows Levels slider)` + `⚠️ Mic input level is only 25%`. The app's diagnostics WORKED — it read the Windows mic Levels slider and found it at 25%. Taptalk is pure passthrough (no AGC) so it hears the TRUE 25% level; Discord/other apps apply their own auto-gain and mask it. User's voice IS present (peak 0.0456, 16x above noise) but attenuated by Windows to 25%.

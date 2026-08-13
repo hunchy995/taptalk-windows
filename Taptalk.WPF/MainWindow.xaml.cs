@@ -6,6 +6,7 @@ using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using Taptalk.Core;
 using Taptalk.Engine.Parakeet;
 using Taptalk.Engine.Whisper;
+using Clipboard = System.Windows.Clipboard; // disambiguate from System.Windows.Forms.Clipboard
 
 namespace Taptalk.WPF;
 
@@ -36,6 +37,7 @@ public partial class MainWindow : Window
     private readonly object _stateLock = new();
 
     private bool _autoStop = true;
+    private bool _copyOnly = false;
     private readonly Stopwatch _sessionTimer = new();
     private bool _isPartialTranscribing;
     private bool _warnedNoAudio;
@@ -337,7 +339,14 @@ public partial class MainWindow : Window
                 Log($"📝 \"{cleaned}\"");
 
                 if (!string.IsNullOrWhiteSpace(cleaned))
-                    await TextInjector.InjectTextAsync(cleaned);
+                {
+                    // Always copy to clipboard so the user can paste even if injection misses the target
+                    await SetClipboardTextAsync(cleaned);
+
+                    // Only send keystrokes if Copy-Only mode is OFF
+                    if (!_copyOnly)
+                        await TextInjector.InjectTextAsync(cleaned);
+                }
 
                 _overlay?.SetDone();
                 await Task.Delay(900);
@@ -358,6 +367,23 @@ public partial class MainWindow : Window
         _state = RecordingState.Idle;
         _overlay?.SetIdle();
         _sessionTimer.Reset();
+    }
+
+    /// <summary>Set clipboard text from a background thread without touching STA UI clipboard directly.</summary>
+    private async Task SetClipboardTextAsync(string text)
+    {
+        await Dispatcher.InvokeAsync(() =>
+        {
+            try
+            {
+                Clipboard.SetText(text);
+                DebugRecorder.Log("INJ", $"Copied to clipboard: \"{text}\"");
+            }
+            catch (Exception ex)
+            {
+                DebugRecorder.Log("INJ", $"Clipboard copy failed: {ex.Message}");
+            }
+        });
     }
 
     private void Log(string msg)
@@ -483,6 +509,11 @@ public partial class MainWindow : Window
     private void AutoStopChk_Checked(object sender, RoutedEventArgs e)
     {
         _autoStop = AutoStopChk.IsChecked.GetValueOrDefault(true);
+    }
+
+    private void CopyOnlyChk_Checked(object sender, RoutedEventArgs e)
+    {
+        _copyOnly = CopyOnlyChk.IsChecked.GetValueOrDefault(false);
     }
 
     private void MicSettingsBtn_Click(object sender, RoutedEventArgs e)

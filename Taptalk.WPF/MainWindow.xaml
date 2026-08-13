@@ -37,6 +37,7 @@
         <StackPanel Grid.Row="3" Margin="0,8,0,8">
             <StackPanel Orientation="Horizontal">
                 <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Margin="0,0,20,0" Checked="AutoStopChk_Checked" Unchecked="AutoStopChk_Checked"/>
+                <CheckBox x:Name="CopyOnlyChk" Content="📋 Copy only" IsChecked="False" Margin="0,0,20,0" Checked="CopyOnlyChk_Checked" Unchecked="CopyOnlyChk_Checked" ToolTip="Copy transcription to clipboard instead of typing it"/>
                 <CheckBox x:Name="DebugChk" Content="🔍 Debug" IsChecked="True" Margin="0,0,12,0" Checked="DebugChk_Changed" Unchecked="DebugChk_Changed"/>
                 <Button x:Name="ClearLogBtn" Content="Clear" Padding="8,2" Click="ClearLogBtn_Click"/>
             </StackPanel>
