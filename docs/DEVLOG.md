@@ -82,6 +82,16 @@ After the first build still produced all-blank frames, I checked the official re
 
 **Build:** v1.0.5
 
+## 2026-08-13f — Fix startup crash (null PasteShortcutHint)
+
+**Symptom:** v1.0.5 installs but the app never opens; Event Viewer shows `NullReferenceException` in `PasteShortcutBox_TextChanged` during `InitializeComponent`.
+
+**Fix:**
+- The new `PasteShortcutBox` fires `TextChanged` while XAML is still loading, before `PasteShortcutHint` is constructed.
+- Added a null guard so the handler returns early during initialization.
+
+**Build:** v1.0.6
+
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 
 **Log evidence (the smoking gun):** `Endpoint mic level: 25% (Windows Levels slider)` + `⚠️ Mic input level is only 25%`. The app's diagnostics WORKED — it read the Windows mic Levels slider and found it at 25%. Taptalk is pure passthrough (no AGC) so it hears the TRUE 25% level; Discord/other apps apply their own auto-gain and mask it. User's voice IS present (peak 0.0456, 16x above noise) but attenuated by Windows to 25%.

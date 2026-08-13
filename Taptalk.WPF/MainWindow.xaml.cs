@@ -557,6 +557,10 @@ public partial class MainWindow : Window
 
     private void PasteShortcutBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
+        // During InitializeComponent the TextBox can fire TextChanged before the hint label is constructed.
+        if (PasteShortcutHint == null)
+            return;
+
         // Just validate and update the hint
         var (_, _, vKey) = ParsePasteShortcut();
         if (vKey == 0)
