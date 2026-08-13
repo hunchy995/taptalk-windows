@@ -13,13 +13,23 @@
 4. **Wrong model file selection.** README pointed to `model.onnx` (~41MB) which requires external `model.onnx.data` (~2.4GB). The self-contained file is `model.int8.onnx` (~650MB). Added size detection + warning in `LoadModel()` and updated README.
 5. **Silent DirectML INT8 failure on AMD.** Added feature-tensor and logit statistics (min/max/mean/NaN) to the debug log so the user can verify whether DirectML is producing valid output.
 
-**Fixes applied:**
+**Fixes applied (first pass):**
 - `MelScaleFeaturizer.Extract()`: scale to 32768, pre-emphasis 0.97, per-feature z-score normalization.
 - `VADDetector`: added `Check(float rms, int nowMs)` overload for streaming chunks; `MainWindow.CheckVadCore()` now uses the incoming chunk instead of `GetSnapshot()`.
 - `AudioCapture.GetSnapshot()`: direct float read, no short PCM roundtrip.
 - `ParakeetEngine.LoadModel()`: warns if model file <100MB and missing `.data` file.
 - `ParakeetEngine.Transcribe()` + `RunInferenceCore()`: logs feature tensor stats and logit min/max/NaN.
 - `README.md`: explicitly instructs users to download `model.int8.onnx` and `vocab.txt`.
+
+**Second pass — exact onnx-asr match:**
+After the first build still produced all-blank frames, I checked the official reference implementation (`onnx-asr` by the model exporter). The real mismatches were:
+- **Slaney mel scale** with **Slaney bandwidth normalization** (old code used HTK scale + no normalization).
+- Hann window must be **400-point zero-padded to 512** (old code used a 400-point window on a 400-sample segment).
+- Waveform must be **padded by 256 samples** on each side.
+- Audio must stay in **[-1,1]** float range (no ×32768 scaling).
+- Log zero guard value is **2^-24**.
+- Feature output is flattened `[1, 80, T]` directly.
+- Length input formula matches reference: `frames / 8`.
 
 **Files:** `Taptalk.Engine.Parakeet/MelScaleFeaturizer.cs`, `Taptalk.Engine.Parakeet/ParakeetEngine.cs`, `Taptalk.Core/VADDetector.cs`, `Taptalk.Core/AudioCapture.cs`, `Taptalk.WPF/MainWindow.xaml.cs`, `README.md`
 

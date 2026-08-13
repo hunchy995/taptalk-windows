@@ -7,7 +7,7 @@ namespace Taptalk.Engine.Parakeet;
 /// <summary>
 /// NVIDIA Parakeet ASR via ONNX Runtime + DirectML.
 /// Uses the AMD/any GPU through DirectML; falls back to CPU if GPU init fails.
-/// Model: istupakov/parakeet-tdt-0.6b-v3-onnx
+/// Model: istupakov/parakeet-ctc-0.6b-onnx
 /// </summary>
 public sealed class ParakeetEngine : ISttEngine
 {
@@ -39,7 +39,6 @@ public sealed class ParakeetEngine : ISttEngine
     {
         if (_session == null) return;
         _outputNames = _session.OutputMetadata.Keys.ToArray();
-        // Pick the first non-length float input as the audio input
         foreach (var kv in _session.InputMetadata)
         {
             var name = kv.Key;
@@ -72,13 +71,9 @@ public sealed class ParakeetEngine : ISttEngine
 
         try
         {
-            // Try DirectML (GPU) first — works on AMD Radeon/NVIDIA/Intel
             var dmlOptions = new SessionOptions
             {
                 GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-                // DML EP stabilizers (coding-partner + research): sequential execution
-                // avoids internal DML concurrency bugs; disabling the memory pattern
-                // optimizer avoids AVs when input shapes fluctuate under DirectML.
                 ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
                 EnableMemoryPattern = false
             };
@@ -92,7 +87,6 @@ public sealed class ParakeetEngine : ISttEngine
         }
         catch (Exception dmlEx)
         {
-            // Fallback to CPU
             try
             {
                 _session = new InferenceSession(modelPath);
@@ -121,7 +115,6 @@ public sealed class ParakeetEngine : ISttEngine
         DebugRecorder.Log("DEC", $"Vocab loaded: {_vocab != null}, size={_vocab?.Length ?? 0}");
     }
 
-    /// <summary>Look for vocab.txt next to the model file and load it (case-insensitive).</summary>
     private void AutoLoadSiblingVocab(string modelPath)
     {
         var dir = Path.GetDirectoryName(modelPath);
@@ -153,7 +146,6 @@ public sealed class ParakeetEngine : ISttEngine
         var normalized = NormalizeForInference(audio, isPartial: false);
         var features = _featurizer.Extract(normalized);
 
-        // Sanity-check the feature tensor to catch silent preprocessing failures
         FeatureStats(features, out float featMin, out float featMax, out float featMean);
         DebugRecorder.Log("FEAT", $"Feature tensor min={featMin:F2} max={featMax:F2} mean={featMean:F2}");
 
@@ -162,48 +154,36 @@ public sealed class ParakeetEngine : ISttEngine
 
     public string TranscribePartial(float[] audio)
     {
-        // Same path — Parakeet handles partial buffers well
         var normalized = NormalizeForInference(audio, isPartial: true);
         var features = _featurizer.Extract(normalized);
         return RunInference(features);
     }
 
-    private static void FeatureStats(float[,] features, out float min, out float max, out float mean)
+    private static void FeatureStats(float[] features, out float min, out float max, out float mean)
     {
         min = float.MaxValue; max = float.MinValue; double sum = 0;
-        int rows = features.GetLength(0), cols = features.GetLength(1);
-        int n = rows * cols;
-        for (int i = 0; i < rows; i++)
-            for (int j = 0; j < cols; j++)
-            {
-                var v = features[i, j];
-                if (v < min) min = v;
-                if (v > max) max = v;
-                sum += v;
-            }
-        mean = n > 0 ? (float)(sum / n) : 0f;
+        for (int i = 0; i < features.Length; i++)
+        {
+            var v = features[i];
+            if (v < min) min = v;
+            if (v > max) max = v;
+            sum += v;
+        }
+        mean = features.Length > 0 ? (float)(sum / features.Length) : 0f;
     }
 
     public void ResetSession() => _sessionGain = 1.0f;
 
-    /// <summary>
-    /// Peak-normalize quiet mic input (DC-offset removal, 0.90 target peak, 30x cap).
-    /// Partials use the session gain computed over the FULL accumulated buffer so
-    /// short silence windows don't amplify noise into hallucinations (gain pumping).
-    /// </summary>
     private float _sessionGain = 1.0f;
     private float[] NormalizeForInference(float[] audio, bool isPartial)
     {
         if (audio.Length == 0) return audio;
 
-        // Diagnostics on the raw buffer
         var (rawPeak, rawRms) = AudioNormalizer.Measure(audio);
 
         float[] copy = new float[audio.Length];
         Array.Copy(audio, copy, audio.Length);
 
-        // The caller passes the accumulated snapshot (partials grow each tick), so
-        // normalizing it gives a stable session gain — same factor for full + partials.
         float gain = AudioNormalizer.NormalizeInPlace(copy);
         _sessionGain = gain;
 
@@ -215,12 +195,9 @@ public sealed class ParakeetEngine : ISttEngine
         return copy;
     }
 
-    private string RunInference(float[,] features)
+    private string RunInference(float[] features)
     {
         if (_isDisposed) throw new ObjectDisposedException(nameof(ParakeetEngine));
-
-        // SERIALIZE: partial + full transcriptions must NEVER hit the DML session
-        // concurrently (native crash class). Blocking is fine — we're on a Task.Run thread.
         _runGate.Wait();
         try
         {
@@ -232,48 +209,44 @@ public sealed class ParakeetEngine : ISttEngine
         }
     }
 
-    private string RunInferenceCore(float[,] features)
+    private string RunInferenceCore(float[] features)
     {
-        int melBins = features.GetLength(0);
-        int frames = features.GetLength(1);
+        int total = features.Length;
+        if (total == 0 || total % MelScaleFeaturizer.MelBands != 0)
+        {
+            DebugRecorder.Log("ERR", $"Invalid feature tensor length {total}");
+            return "";
+        }
 
-        // Flatten to [1, 80, T]
-        var input = new float[1 * melBins * frames];
-        int idx = 0;
-        for (int f = 0; f < frames; f++)
-            for (int m = 0; m < melBins; m++)
-                input[idx++] = features[m, f];
+        int frames = total / MelScaleFeaturizer.MelBands;
+        int melBins = MelScaleFeaturizer.MelBands;
 
-        using var inputTensor = OrtValue.CreateTensorValueFromMemory(input, new long[] { 1, melBins, frames });
+        using var inputTensor = OrtValue.CreateTensorValueFromMemory(features, new long[] { 1, melBins, frames });
 
         var inputs = new Dictionary<string, OrtValue> { [_inputName] = inputTensor };
         OrtValue? lenTensor = null;
         if (_hasLengthInput)
         {
-            // length = number of frames AFTER 8x subsampling (per config subsampling_factor=8)
-            // NOTE: do NOT use 'using var' here — it would dispose before Run() below
             long len = Math.Max(1, frames / 8);
             lenTensor = OrtValue.CreateTensorValueFromMemory(new long[] { len }, new long[] { 1 });
             inputs["length"] = lenTensor;
         }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        DebugRecorder.Log("INF", $"Run: '{_inputName}'=[1,{melBins},{frames}]" + (_hasLengthInput ? $" length={inputs["length"]}" : "") + $" → outputs=[{string.Join(",", _outputNames)}]");
-        using var results = _session.Run(_runOptions, inputs, _outputNames);
+        DebugRecorder.Log("INF", $"Run: '{_inputName}'=[1,{melBins},{frames}] length={(_hasLengthInput ? (frames / 8).ToString() : "n/a")} → outputs=[{string.Join(",", _outputNames)}]");
+
+        using var results = _session!.Run(_runOptions, inputs, _outputNames);
         sw.Stop();
         lenTensor?.Dispose();
 
-        // Assume first output is logits; get argmax per timestep → tokens
         var output = results[0];
         var shapeInfo = output.GetTensorTypeAndShape();
         var shape = shapeInfo.Shape;
-        // [1, T, vocab] typical for CTC models
         long T = shape.Length >= 2 ? shape[^2] : 1;
         long V = shape.Length >= 1 ? shape[^1] : 1;
 
-        var logits = output.GetTensorDataAsSpan<float>().ToArray(); // copy NOW — span dangles after results.Dispose()
+        var logits = output.GetTensorDataAsSpan<float>().ToArray();
 
-        // Diagnostics: detect NaN / all-blank output to flag AMD DirectML INT8 issues
         bool hasNaN = false;
         float minLogit = float.MaxValue, maxLogit = float.MinValue;
         for (int i = 0; i < logits.Length; i++)
@@ -298,7 +271,6 @@ public sealed class ParakeetEngine : ISttEngine
             tokens.Add(best);
         }
 
-        // Strip blanks (blank = V-1 = 1024 for this model) and collapse repeats
         int blank = (int)V - 1;
         var collapsed = new List<int>();
         int prev = -1;
@@ -311,7 +283,6 @@ public sealed class ParakeetEngine : ISttEngine
         }
         DebugRecorder.Log("DEC", $"Raw frames={tokens.Count} | blank={blankCount} | collapsed tokens={collapsed.Count} | first tokens=[{string.Join(",", collapsed.Take(10))}]");
 
-        // Decode via BPE/WordPiece vocab
         return DecodeTokens(collapsed);
     }
 
@@ -331,14 +302,12 @@ public sealed class ParakeetEngine : ISttEngine
             {
                 string token = _vocab[t];
                 if (string.IsNullOrEmpty(token)) continue;
-                // Skip special/control tokens (marked with <> or empty)
                 if (token.StartsWith("<") && token.EndsWith(">")) continue;
                 sb.Append(token);
             }
         }
 
         string result = sb.ToString();
-        // SentencePiece space marker → real space
         result = result.Replace("\u2581", " ");
         result = System.Text.RegularExpressions.Regex.Replace(result, @"\s+", " ");
         var trimmed = result.Trim();
@@ -350,7 +319,6 @@ public sealed class ParakeetEngine : ISttEngine
 
     public void LoadVocabulary(string[] vocab) => _vocab = vocab;
 
-    /// <summary>Parse a vocab.txt ("token index" per line, SentencePiece format).</summary>
     public bool LoadVocabularyFromFile(string vocabPath)
     {
         try
@@ -398,8 +366,6 @@ public sealed class ParakeetEngine : ISttEngine
         if (_isDisposed) return;
         _isDisposed = true;
 
-        // Wait for any in-flight Run to finish before tearing down the session
-        // (never dispose the DML session mid-Run — native use-after-free crash).
         _runGate.Wait();
         try
         {
