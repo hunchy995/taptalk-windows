@@ -58,6 +58,18 @@ After the first build still produced all-blank frames, I checked the official re
 
 **Build:** v1.0.3
 
+## 2026-08-13d — Focus-aware injection + clipboard retries
+
+**Symptom:** Text is transcribed correctly but is not pasted into the intended text field; log shows `CLIPBRD_E_CANT_OPEN` and paste goes to the wrong window.
+
+**Fix:**
+- Taptalk now records which window had focus when recording started and restores that window before typing/pasting.
+- Clipboard operations retry up to 10 times (50ms backoff) to survive `CLIPBRD_E_CANT_OPEN`.
+- Text shorter than 50 characters is now sent as direct `SendInput` Unicode keystrokes instead of clipboard paste (avoids clipboard contention entirely for short phrases).
+- Added short delays after recording stops so overlay focus changes settle before injection.
+
+**Build:** v1.0.4
+
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 
 **Log evidence (the smoking gun):** `Endpoint mic level: 25% (Windows Levels slider)` + `⚠️ Mic input level is only 25%`. The app's diagnostics WORKED — it read the Windows mic Levels slider and found it at 25%. Taptalk is pure passthrough (no AGC) so it hears the TRUE 25% level; Discord/other apps apply their own auto-gain and mask it. User's voice IS present (peak 0.0456, 16x above noise) but attenuated by Windows to 25%.
