@@ -1,12 +1,11 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 using System.Windows;
-using Microsoft.Win32;
-using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
+using System.Windows.Controls;
 using Taptalk.Core;
 using Taptalk.Engine.Parakeet;
 using Taptalk.Engine.Whisper;
-using Clipboard = System.Windows.Clipboard; // disambiguate from System.Windows.Forms.Clipboard
 
 namespace Taptalk.WPF;
 
@@ -80,7 +79,10 @@ public partial class MainWindow : Window
 
         MicCombo.SelectionChanged += OnMicSelectionChanged;
 
-        // 2. Surface mic device failures safely on the UI thread
+        // 2. Restore persistent settings (engine, model path, options)
+        LoadSettings();
+
+        // 3. Surface mic device failures safely on the UI thread
         _capture.OnError += msg =>
         {
             Dispatcher.BeginInvoke(() =>
@@ -91,7 +93,7 @@ public partial class MainWindow : Window
             });
         };
 
-        // 3. Overlay window
+        // 4. Overlay window
         _overlay = new OverlayWindow();
         _overlay.OnTap += OnMicTap;
         _overlay.OnDragEnd += () => { };
@@ -119,32 +121,6 @@ public partial class MainWindow : Window
         _capture.OnChunk += Chunk => CheckVad(Chunk);
 
         Log("Taptalk ready. Press Ctrl+Shift+Space or tap the overlay mic to record.");
-    }
-
-    /// <summary>Parse a shortcut string like "Ctrl+D", "Ctrl+V", "Ctrl+Shift+V" into virtual-key codes.</summary>
-    private (bool ctrl, bool shift, ushort vKey) ParsePasteShortcut()
-    {
-        var text = PasteShortcutBox?.Text ?? "Ctrl+V";
-        var parts = text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        bool ctrl = false, shift = false;
-        ushort vKey = 0x56; // default V
-
-        foreach (var part in parts)
-        {
-            var p = part.ToUpperInvariant();
-            if (p == "CTRL") { ctrl = true; continue; }
-            if (p == "SHIFT") { shift = true; continue; }
-            if (p == "ALT") continue; // not supported yet
-            if (p.Length == 1)
-            {
-                // Letter/digit → virtual key code
-                var c = p[0];
-                if (c >= 'A' && c <= 'Z') vKey = (ushort)(0x41 + (c - 'A'));
-                else if (c >= '0' && c <= '9') vKey = (ushort)(0x30 + (c - '0'));
-            }
-        }
-
-        return (ctrl, shift, vKey);
     }
 
     private void OnMicSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -366,18 +342,13 @@ public partial class MainWindow : Window
 
                 if (!string.IsNullOrWhiteSpace(cleaned))
                 {
-                    // Brief pause so the overlay/UI focus change settles before sending Ctrl+V
+                    // Brief pause so the overlay/UI focus change settles before injecting
                     await Task.Delay(150);
 
-                    // Always copy to clipboard so the user can paste manually if auto-paste misses
-                    await SetClipboardTextAsync(cleaned);
-
-                    // Send the user's configured paste shortcut to whatever window is currently active
                     if (_autoPaste)
                     {
-                        var (ctrl, shift, vKey) = ParsePasteShortcut();
-                        DebugRecorder.Log("INJ", $"Sending paste shortcut Ctrl+{(char)(vKey)} to active window");
-                        TextInjector.SendKeyboardShortcut(ctrl, shift, false, vKey);
+                        // Type directly into the active field — never depend on the clipboard.
+                        TextInjector.InjectText(cleaned);
                     }
                 }
 
@@ -402,27 +373,70 @@ public partial class MainWindow : Window
         _sessionTimer.Reset();
     }
 
-    /// <summary>Set clipboard text from a background thread without touching STA UI clipboard directly. Retries if busy.</summary>
-    private async Task SetClipboardTextAsync(string text)
+    /// <summary>Simple persistent settings stored in AppData\Local\Taptalk\settings.json</summary>
+    private string SettingsPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Taptalk", "settings.json");
+
+    private void SaveSettings()
     {
-        await Dispatcher.InvokeAsync(async () =>
+        try
         {
-            for (int attempt = 0; attempt < 10; attempt++)
+            var dir = Path.GetDirectoryName(SettingsPath)!;
+            Directory.CreateDirectory(dir);
+            var settings = new Dictionary<string, object?>
             {
-                try
-                {
-                    Clipboard.SetText(text);
-                    DebugRecorder.Log("INJ", $"Copied to clipboard (attempt {attempt + 1}): \"{text}\"");
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    DebugRecorder.Log("INJ", $"Clipboard attempt {attempt + 1} failed: {ex.Message}");
-                    await Task.Delay(50);
-                }
+                ["lastModelDirectory"] = _lastModelDirectory,
+                ["lastModelPath"] = ModelPathBox?.Text ?? "",
+                ["engineIndex"] = EngineCombo?.SelectedIndex ?? 0,
+                ["autoStop"] = AutoStopChk?.IsChecked ?? true,
+                ["autoPaste"] = AutoPasteChk?.IsChecked ?? true,
+                ["debug"] = DebugChk?.IsChecked ?? true
+            };
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings));
+        }
+        catch (Exception ex)
+        {
+            DebugRecorder.Log("CFG", $"Save settings failed: {ex.Message}");
+        }
+    }
+
+    private string _lastModelDirectory = "";
+
+    private void LoadSettings()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return;
+            var json = File.ReadAllText(SettingsPath);
+            var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("lastModelDirectory", out var d))
+                _lastModelDirectory = d.GetString() ?? "";
+
+            if (root.TryGetProperty("lastModelPath", out var p) && File.Exists(p.GetString() ?? ""))
+            {
+                ModelPathBox.Text = p.GetString()!;
+                LoadEngine();
             }
-            DebugRecorder.Log("INJ", "Clipboard copy failed after 10 attempts");
-        });
+
+            if (root.TryGetProperty("engineIndex", out var e) && EngineCombo != null)
+                EngineCombo.SelectedIndex = e.GetInt32();
+
+            if (root.TryGetProperty("autoStop", out var a) && AutoStopChk != null)
+                AutoStopChk.IsChecked = a.GetBoolean();
+
+            if (root.TryGetProperty("autoPaste", out var ap) && AutoPasteChk != null)
+                AutoPasteChk.IsChecked = ap.GetBoolean();
+
+            if (root.TryGetProperty("debug", out var dbg) && DebugChk != null)
+                DebugChk.IsChecked = dbg.GetBoolean();
+        }
+        catch (Exception ex)
+        {
+            DebugRecorder.Log("CFG", $"Load settings failed: {ex.Message}");
+        }
     }
 
     private void Log(string msg)
@@ -468,6 +482,7 @@ public partial class MainWindow : Window
         bool on = DebugChk.IsChecked.GetValueOrDefault(true);
         Taptalk.Core.DebugRecorder.Instance.IsVerboseEnabled = on;
         Log("🔍 Debug mode " + (on ? "ON" : "OFF"));
+        SaveSettings();
     }
 
     private void ClearLogBtn_Click(object sender, RoutedEventArgs e)
@@ -476,24 +491,30 @@ public partial class MainWindow : Window
         Log("Log cleared — full history is in " + Taptalk.Core.DebugRecorder.Instance.LogFilePath);
     }
 
-    // ---------- Settings UI handlers (unchanged) ----------
-
     private void EngineCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (IsLoaded && ModelPathBox.Text.Length > 0 && File.Exists(ModelPathBox.Text))
+        {
             LoadEngine();
+            SaveSettings();
+        }
     }
 
     private void ModelBrowseBtn_Click(object sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog
+        var dlg = new Microsoft.Win32.OpenFileDialog
         {
             Filter = "Model files (*.onnx;*.bin;*.gguf)|*.onnx;*.bin;*.gguf|All files (*.*)|*.*",
             Title = "Select ASR model"
         };
+        if (!string.IsNullOrEmpty(_lastModelDirectory) && Directory.Exists(_lastModelDirectory))
+            dlg.InitialDirectory = _lastModelDirectory;
+
         if (dlg.ShowDialog() != true) return;
 
+        _lastModelDirectory = Path.GetDirectoryName(dlg.FileName) ?? "";
         ModelPathBox.Text = dlg.FileName;
+        SaveSettings();
         LoadEngine();
     }
 
@@ -548,31 +569,13 @@ public partial class MainWindow : Window
     private void AutoStopChk_Checked(object sender, RoutedEventArgs e)
     {
         _autoStop = AutoStopChk.IsChecked.GetValueOrDefault(true);
+        SaveSettings();
     }
 
     private void AutoPasteChk_Checked(object sender, RoutedEventArgs e)
     {
         _autoPaste = AutoPasteChk.IsChecked.GetValueOrDefault(true);
-    }
-
-    private void PasteShortcutBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
-    {
-        // During InitializeComponent the TextBox can fire TextChanged before the hint label is constructed.
-        if (PasteShortcutHint == null)
-            return;
-
-        // Just validate and update the hint
-        var (_, _, vKey) = ParsePasteShortcut();
-        if (vKey == 0)
-        {
-            PasteShortcutHint.Text = "Invalid shortcut (use Ctrl+Letter or Ctrl+Shift+Letter)";
-            PasteShortcutHint.Foreground = System.Windows.Media.Brushes.Crimson;
-        }
-        else
-        {
-            PasteShortcutHint.Text = $"Paste shortcut after recording";
-            PasteShortcutHint.Foreground = System.Windows.Media.Brushes.Gray;
-        }
+        SaveSettings();
     }
 
     private void MicSettingsBtn_Click(object sender, RoutedEventArgs e)

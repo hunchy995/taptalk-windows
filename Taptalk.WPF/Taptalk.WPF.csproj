@@ -14,6 +14,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Taptalk.Core\Taptalk.Core.csproj" />
     <ProjectReference Include="..\Taptalk.Engine.Parakeet\Taptalk.Engine.Parakeet.csproj" />
     <ProjectReference Include="..\Taptalk.Engine.Whisper\Taptalk.Engine.Whisper.csproj" />

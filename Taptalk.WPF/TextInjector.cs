@@ -1,14 +1,13 @@
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
-using IDataObject = System.Windows.IDataObject;
-using Clipboard = System.Windows.Clipboard;
 
 namespace Taptalk.WPF;
 
 /// <summary>
-/// Sends keyboard shortcuts and injects text into the focused window.
-/// Auto-paste path: copy to clipboard, then send the configured paste shortcut.
+/// Types text into the currently focused window using fake Unicode keystrokes.
+/// No clipboard, no paste shortcut, no focus management.
 /// </summary>
 public static class TextInjector
 {
@@ -40,37 +39,10 @@ public static class TextInjector
     private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 
-    /// <summary>Send a raw keyboard shortcut (e.g. Ctrl+V) to the active window.</summary>
-    public static void SendKeyboardShortcut(bool ctrl, bool shift, bool alt, ushort vKey)
-    {
-        var list = new List<INPUT>();
-
-        void KeyDown(ushort vk) => list.Add(new INPUT
-        {
-            type = INPUT_KEYBOARD,
-            ki = new KEYBDINPUT { wVk = vk }
-        });
-        void KeyUp(ushort vk) => list.Add(new INPUT
-        {
-            type = INPUT_KEYBOARD,
-            ki = new KEYBDINPUT { wVk = vk, dwFlags = KEYEVENTF_KEYUP }
-        });
-
-        if (ctrl) KeyDown(0x11); // VK_CONTROL
-        if (shift) KeyDown(0x10); // VK_SHIFT
-        if (alt) KeyDown(0x12); // VK_MENU
-        KeyDown(vKey);
-        KeyUp(vKey);
-        if (alt) KeyUp(0x12);
-        if (shift) KeyUp(0x10);
-        if (ctrl) KeyUp(0x11);
-
-        SendInput((uint)list.Count, list.ToArray(), Marshal.SizeOf<INPUT>());
-    }
-
-    public static async Task InjectTextAsync(string text)
+    /// <summary>Type the transcription directly into whatever window currently has focus.</summary>
+    public static void InjectText(string text)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -78,31 +50,25 @@ public static class TextInjector
             return;
         }
 
-        // Capture the foreground window title for diagnostics
-        string target = "Unknown";
+        string target = GetForegroundWindowTitle();
+        Taptalk.Core.DebugRecorder.Log("INJ", $"Typing {text.Length} chars into active window '{target}': \"{text}\"");
+        SendUnicodeKeys(text);
+        Taptalk.Core.DebugRecorder.Log("INJ", "Typing complete");
+    }
+
+    private static string GetForegroundWindowTitle()
+    {
         try
         {
             var hwnd = GetForegroundWindow();
             if (hwnd != IntPtr.Zero)
             {
-                var sb = new System.Text.StringBuilder(256);
-                if (GetWindowText(hwnd, sb, 256) > 0) target = sb.ToString();
+                var sb = new StringBuilder(256);
+                if (GetWindowText(hwnd, sb, 256) > 0) return sb.ToString();
             }
         }
         catch { }
-
-        if (text.Length < 50)
-        {
-            Taptalk.Core.DebugRecorder.Log("INJ", $"SendInput → '{target}' | chars={text.Length} | text=\"{text}\"");
-            SendUnicodeKeys(text);
-            Taptalk.Core.DebugRecorder.Log("INJ", "SendInput complete");
-        }
-        else
-        {
-            Taptalk.Core.DebugRecorder.Log("INJ", $"Clipboard+Ctrl+V → '{target}' | chars={text.Length} | text=\"{text}\"");
-            await InjectViaClipboardAsync(text);
-            Taptalk.Core.DebugRecorder.Log("INJ", "Clipboard injection complete");
-        }
+        return "Unknown";
     }
 
     private static void SendUnicodeKeys(string text)
@@ -122,45 +88,5 @@ public static class TextInjector
             };
         }
         SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
-    }
-
-    private static async Task InjectViaClipboardAsync(string text)
-    {
-        IDataObject? current = null;
-        try { current = Clipboard.GetDataObject(); } catch { /* clipboard busy */ }
-
-        for (int attempt = 0; attempt < 10; attempt++)
-        {
-            try
-            {
-                Clipboard.SetText(text);
-                SendPaste();
-                await Task.Delay(120);
-                break; // success
-            }
-            catch
-            {
-                if (attempt == 9)
-                {
-                    // Clipboard failed repeatedly — fall back to keystrokes
-                    SendUnicodeKeys(text);
-                    break;
-                }
-                await Task.Delay(50);
-            }
-        }
-
-        if (current != null)
-        {
-            await Task.Delay(80);
-            try { Clipboard.SetDataObject(current); } catch { }
-        }
-    }
-
-    private static void SendPaste()
-    {
-        // Give the target field a moment to receive focus before sending Ctrl+V
-        Thread.Sleep(80);
-        SendKeyboardShortcut(true, false, false, 0x56); // Ctrl + V
     }
 }

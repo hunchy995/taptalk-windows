@@ -92,6 +92,18 @@ After the first build still produced all-blank frames, I checked the official re
 
 **Build:** v1.0.6
 
+## 2026-08-13g — Keystroke-only auto-type + settings persistence
+
+**Symptom:** Clipboard is locked by another process (`CLIPBRD_E_CANT_OPEN`), so paste fails. User prefers to abandon paste/clipboard entirely and inject via direct keystrokes. Also wants the model-file browser to remember the last directory.
+
+**Fix:**
+- Removed all clipboard and paste-shortcut logic.
+- Auto-type now sends text as **direct Unicode keystrokes** into whatever window is currently focused.
+- Removed the "Paste shortcut" UI row from settings.
+- Added persistent settings (`%LOCALAPPDATA%\\Taptalk\\settings.json`) for: last model directory, last model path, engine index, auto-stop, auto-type, debug mode.
+
+**Build:** v1.0.7
+
 ## 2026-08-09 — ROOT CAUSE CONFIRMED: Windows mic level 25% (pure passthrough) → Fix Mic Level button (11th report)
 
 **Log evidence (the smoking gun):** `Endpoint mic level: 25% (Windows Levels slider)` + `⚠️ Mic input level is only 25%`. The app's diagnostics WORKED — it read the Windows mic Levels slider and found it at 25%. Taptalk is pure passthrough (no AGC) so it hears the TRUE 25% level; Discord/other apps apply their own auto-gain and mask it. User's voice IS present (peak 0.0456, 16x above noise) but attenuated by Windows to 25%.
