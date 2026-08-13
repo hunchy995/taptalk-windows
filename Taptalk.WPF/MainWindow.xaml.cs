@@ -366,19 +366,17 @@ public partial class MainWindow : Window
 
                 if (!string.IsNullOrWhiteSpace(cleaned))
                 {
-                    // Brief pause so the overlay/UI focus change settles before sending Ctrl+V
+                    // Brief pause so the overlay/UI focus change settles before injecting
                     await Task.Delay(150);
 
-                    // Always copy to clipboard so the user can paste manually if auto-paste misses
-                    await SetClipboardTextAsync(cleaned);
-
-                    // Send the user's configured paste shortcut to whatever window is currently active
                     if (_autoPaste)
                     {
-                        var (ctrl, shift, vKey) = ParsePasteShortcut();
-                        DebugRecorder.Log("INJ", $"Sending paste shortcut Ctrl+{(char)(vKey)} to active window");
-                        TextInjector.SendKeyboardShortcut(ctrl, shift, false, vKey);
+                        // Type directly into the active field — never depend on the clipboard being free.
+                        await TextInjector.InjectTextAsync(cleaned);
                     }
+
+                    // Also copy to clipboard as a backup, but do not block on clipboard failures.
+                    _ = SetClipboardTextAsync(cleaned);
                 }
 
                 _overlay?.SetDone();

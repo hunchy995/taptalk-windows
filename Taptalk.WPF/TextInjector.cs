@@ -7,11 +7,13 @@ using Clipboard = System.Windows.Clipboard;
 namespace Taptalk.WPF;
 
 /// <summary>
-/// Sends keyboard shortcuts and injects text into the focused window.
-/// Auto-paste path: copy to clipboard, then send the configured paste shortcut.
+/// Types text into the focused window. Short text → direct Unicode keystrokes.
+/// Long text → clipboard + paste, with fallback to keystrokes if clipboard is busy.
 /// </summary>
 public static class TextInjector
 {
+    private const int DirectTypeLimit = 200;
+
     [StructLayout(LayoutKind.Sequential)]
     private struct INPUT
     {
@@ -91,11 +93,11 @@ public static class TextInjector
         }
         catch { }
 
-        if (text.Length < 50)
+        if (text.Length <= DirectTypeLimit)
         {
-            Taptalk.Core.DebugRecorder.Log("INJ", $"SendInput → '{target}' | chars={text.Length} | text=\"{text}\"");
+            Taptalk.Core.DebugRecorder.Log("INJ", $"Direct keystrokes → '{target}' | chars={text.Length} | text=\"{text}\"");
             SendUnicodeKeys(text);
-            Taptalk.Core.DebugRecorder.Log("INJ", "SendInput complete");
+            Taptalk.Core.DebugRecorder.Log("INJ", "Direct keystrokes complete");
         }
         else
         {
