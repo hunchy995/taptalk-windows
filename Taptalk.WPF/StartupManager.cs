@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using System.Reflection;
+using Taptalk.Core;
 
 namespace Taptalk.WPF;
 
