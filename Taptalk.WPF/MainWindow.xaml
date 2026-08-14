@@ -2,62 +2,210 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Taptalk Settings"
-        Width="440" Height="600"
-        WindowStartupLocation="CenterScreen">
+        Width="520" Height="760"
+        MinWidth="480" MinHeight="600"
+        WindowStartupLocation="CenterScreen"
+        Background="#FAF9F6"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial">
+
+    <Window.Resources>
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="#E5E5EA" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="14" />
+            <Setter Property="Padding" Value="16" />
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect BlurRadius="12" ShadowDepth="0" Opacity="0.06" Color="Black" />
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="#1C1C1E" />
+            <Setter Property="Margin" Value="0,0,0,10" />
+        </Style>
+
+        <Style x:Key="SubText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Foreground" Value="#8E8E93" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#E55B2B" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="14,6" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border"
+                               Background="{TemplateBinding Background}"
+                               BorderBrush="{TemplateBinding BorderBrush}"
+                               BorderThickness="{TemplateBinding BorderThickness}"
+                               CornerRadius="10"
+                               Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Opacity" Value="0.9" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Opacity" Value="0.8" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#1C1C1E" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Margin" Value="0,4,0,4" />
+        </Style>
+
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="#E5E5EA" />
+            <Setter Property="Padding" Value="6,4" />
+            <Setter Property="Margin" Value="0,4,0,0" />
+        </Style>
+
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="#E5E5EA" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+    </Window.Resources>
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Text="Taptalk — Voice to Text" FontSize="20" FontWeight="Bold" Margin="0,0,0,12"/>
-
-        <StackPanel Grid.Row="1" Margin="0,0,0,8">
-            <TextBlock Text="Engine:" FontWeight="SemiBold"/>
-            <ComboBox x:Name="EngineCombo" SelectedIndex="0" Margin="0,4,0,0" SelectionChanged="EngineCombo_SelectionChanged">
-                <ComboBoxItem Content="Parakeet (GPU — DirectML)"/>
-                <ComboBoxItem Content="Whisper (CPU — whisper.cpp)"/>
-            </ComboBox>
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,18">
+            <TextBlock Text="Taptalk" FontSize="24" FontWeight="Bold" Foreground="#1C1C1E" />
+            <TextBlock Text="Voice to Text" FontSize="12" Foreground="#8E8E93" Margin="0,-2,0,0" />
         </StackPanel>
 
-        <StackPanel Grid.Row="2" Margin="0,8,0,8">
-            <TextBlock Text="Model:" FontWeight="SemiBold"/>
-            <DockPanel Margin="0,4,0,0">
-                <Button x:Name="ModelBrowseBtn" Content="Browse..." DockPanel.Dock="Right" Padding="10,4" Click="ModelBrowseBtn_Click"/>
-                <TextBox x:Name="ModelPathBox" IsReadOnly="True" Text="No model loaded — click Browse"/>
-            </DockPanel>
-            <TextBlock x:Name="ModelStatusText" Text="" Foreground="#666" FontSize="11" Margin="0,4,0,0"/>
-        </StackPanel>
+        <!-- Content -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
 
-        <StackPanel Grid.Row="3" Margin="0,8,0,8">
-            <StackPanel Orientation="Horizontal">
-                <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Margin="0,0,20,0" Checked="AutoStopChk_Checked" Unchecked="AutoStopChk_Checked"/>
-                <CheckBox x:Name="AutoPasteChk" Content="📌 Auto-type after stop" IsChecked="True" Margin="0,0,20,0" Checked="AutoPasteChk_Checked" Unchecked="AutoPasteChk_Checked" ToolTip="Type the transcription directly into whatever window has focus after recording stops"/>
-                <CheckBox x:Name="DebugChk" Content="🔍 Debug" IsChecked="True" Margin="0,0,12,0" Checked="DebugChk_Changed" Unchecked="DebugChk_Changed"/>
-                <Button x:Name="ClearLogBtn" Content="Clear" Padding="8,2" Click="ClearLogBtn_Click"/>
+                <!-- Engine & Model -->
+                <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                    <StackPanel>
+                        <TextBlock Text="Engine &amp; Model" Style="{StaticResource SectionHeader}" />
+
+                        <TextBlock Text="Engine" Style="{StaticResource SubText}" Margin="0,0,0,2" />
+                        <ComboBox x:Name="EngineCombo" SelectedIndex="0" SelectionChanged="EngineCombo_SelectionChanged">
+                            <ComboBoxItem Content="Parakeet (GPU — DirectML)" />
+                            <ComboBoxItem Content="Whisper (CPU — whisper.cpp)" />
+                        </ComboBox>
+
+                        <TextBlock Text="Model file" Style="{StaticResource SubText}" Margin="0,14,0,2" />
+                        <DockPanel Margin="0,4,0,0">
+                            <Button x:Name="ModelBrowseBtn" Content="Browse..." DockPanel.Dock="Right" Padding="12,6" Margin="8,0,0,0" Click="ModelBrowseBtn_Click" />
+                            <TextBox x:Name="ModelPathBox" IsReadOnly="True" Text="No model loaded — click Browse" VerticalContentAlignment="Center" />
+                        </DockPanel>
+                        <TextBlock x:Name="ModelStatusText" Text="" Style="{StaticResource SubText}" Margin="0,6,0,0" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Microphone -->
+                <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                    <StackPanel>
+                        <TextBlock Text="Microphone" Style="{StaticResource SectionHeader}" />
+
+                        <ComboBox x:Name="MicCombo" SelectionChanged="OnMicSelectionChanged" />
+
+                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                            <Button x:Name="MicSettingsBtn" Content="🔧 Mic Privacy" Padding="10,5" Background="#FFFFFF" Foreground="#1C1C1E" BorderBrush="#E5E5EA" BorderThickness="1" Click="MicSettingsBtn_Click" />
+                            <Button x:Name="SoundSettingsBtn" Content="🔊 Fix Sound" Padding="10,5" Margin="8,0,0,0" Background="#FFFFFF" Foreground="#1C1C1E" BorderBrush="#E5E5EA" BorderThickness="1" Click="SoundSettingsBtn_Click" />
+                            <Button x:Name="FixMicLevelBtn" Content="🔊 Fix Mic Level" Padding="10,5" Margin="8,0,0,0" Visibility="Collapsed" Click="FixMicLevelBtn_Click" />
+                        </StackPanel>
+
+                        <TextBlock x:Name="MicStatusText" Text="" Foreground="#C0392B" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Recording options -->
+                <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                    <StackPanel>
+                        <TextBlock Text="Recording Options" Style="{StaticResource SectionHeader}" />
+
+                        <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Checked="AutoStopChk_Checked" Unchecked="AutoStopChk_Checked" />
+                        <CheckBox x:Name="AutoPasteChk" Content="Auto-type after stop" IsChecked="True" Checked="AutoPasteChk_Checked" Unchecked="AutoPasteChk_Checked" ToolTip="Type the transcription directly into whatever window had focus after recording stops" />
+                        <CheckBox x:Name="ShowOverlayChk" Content="Show floating mic overlay" IsChecked="True" Checked="ShowOverlayChk_Checked" Unchecked="ShowOverlayChk_Checked" ToolTip="You can still use the global hotkey when the overlay is hidden" />
+                        <CheckBox x:Name="MinimizeOnLaunchChk" Content="Minimize to tray on launch" IsChecked="False" Checked="MinimizeOnLaunchChk_Checked" Unchecked="MinimizeOnLaunchChk_Checked" />
+                        <CheckBox x:Name="StartupChk" Content="Start Taptalk with Windows" IsChecked="False" Checked="StartupChk_Checked" Unchecked="StartupChk_Checked" />
+
+                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                            <TextBlock Text="Hotkey: " VerticalAlignment="Center" Style="{StaticResource SubText}" />
+                            <ComboBox x:Name="HotkeyModifierCombo" Width="130" Margin="6,0,6,0" SelectionChanged="HotkeyCombo_SelectionChanged">
+                                <ComboBoxItem Content="Ctrl+Shift" />
+                                <ComboBoxItem Content="Ctrl+Alt" />
+                                <ComboBoxItem Content="Alt+Shift" />
+                                <ComboBoxItem Content="Ctrl+Shift+Alt" />
+                            </ComboBox>
+                            <TextBox x:Name="HotkeyKeyBox" Width="42" MaxLength="1" Text="Space" TextChanged="HotkeyKeyBox_TextChanged" VerticalContentAlignment="Center" />
+                            <TextBlock x:Name="HotkeyStatusText" Text="" VerticalAlignment="Center" Margin="10,0,0,0" Style="{StaticResource SubText}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Debug & History -->
+                <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                    <StackPanel>
+                        <DockPanel Margin="0,0,0,10">
+                            <TextBlock Text="Debug Log" Style="{StaticResource SectionHeader}" DockPanel.Dock="Left" />
+                            <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                                <CheckBox x:Name="DebugChk" Content="🔍 Verbose" IsChecked="True" Checked="DebugChk_Changed" Unchecked="DebugChk_Changed" Margin="0,0,8,0" />
+                                <Button x:Name="ClearLogBtn" Content="Clear" Padding="10,4" Background="#FFFFFF" Foreground="#1C1C1E" BorderBrush="#E5E5EA" BorderThickness="1" Click="ClearLogBtn_Click" />
+                            </StackPanel>
+                        </DockPanel>
+
+                        <TextBox x:Name="LogBox" IsReadOnly="True" Height="160"
+                                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                                 FontFamily="Consolas" FontSize="11" Margin="0,0,0,14" />
+
+                        <DockPanel Margin="0,0,0,8">
+                            <TextBlock Text="History" Style="{StaticResource SectionHeader}" DockPanel.Dock="Left" />
+                            <Button x:Name="ClearHistoryBtn" Content="Clear history" DockPanel.Dock="Right" Padding="10,4" Background="#FFFFFF" Foreground="#1C1C1E" BorderBrush="#E5E5EA" BorderThickness="1" Click="ClearHistoryBtn_Click" />
+                        </DockPanel>
+
+                        <ListBox x:Name="HistoryList" Height="120" BorderBrush="#E5E5EA" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="2">
+                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="12" Foreground="#1C1C1E" />
+                                        <TextBlock Text="{Binding Timestamp, StringFormat='{}{0:MMM dd HH:mm}'}" FontSize="10" Foreground="#8E8E93" Margin="0,2,0,0" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </StackPanel>
+                </Border>
+
             </StackPanel>
-            <TextBlock Text="Microphone:" FontWeight="SemiBold" Margin="0,10,0,0"/>
-            <DockPanel Margin="0,4,0,0">
-                <Button x:Name="FixMicLevelBtn" Content="🔊 Fix Mic Level" DockPanel.Dock="Right" Padding="8,4" Margin="6,0,0,0" Click="FixMicLevelBtn_Click" Visibility="Collapsed"/>
-                <Button x:Name="MicSettingsBtn" Content="🔧 Mic Privacy" DockPanel.Dock="Right" Padding="8,4" Margin="6,0,0,0" Click="MicSettingsBtn_Click"/>
-                <Button x:Name="SoundSettingsBtn" Content="🔊 Fix Sound" DockPanel.Dock="Right" Padding="8,4" Margin="6,0,0,0" Click="SoundSettingsBtn_Click"/>
-                <ComboBox x:Name="MicCombo" Margin="0,0,0,0" SelectionChanged="OnMicSelectionChanged"/>
-            </DockPanel>
-            <TextBlock x:Name="MicStatusText" Text="" Foreground="#C0392B" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
-        </StackPanel>
+        </ScrollViewer>
 
-        <TextBox Grid.Row="4" x:Name="LogBox" IsReadOnly="True"
-                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                 FontFamily="Consolas" FontSize="11" Margin="0,8,0,8"/>
-
-        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
-            <TextBlock Text="Hotkey: Ctrl+Shift+Space" Foreground="#666" VerticalAlignment="Center" Margin="0,0,16,0"/>
-            <Button x:Name="MinimizeBtn" Content="Hide to tray" Padding="12,6" Click="MinimizeBtn_Click"/>
-        </StackPanel>
+        <!-- Footer -->
+        <DockPanel Grid.Row="2" Margin="0,16,0,0">
+            <TextBlock Text="Press your hotkey to record, again to stop." Foreground="#8E8E93" FontSize="11" VerticalAlignment="Center" />
+            <Button x:Name="MinimizeBtn" Content="Hide to tray" DockPanel.Dock="Right" Padding="14,6" Click="MinimizeBtn_Click" />
+        </DockPanel>
     </Grid>
 </Window>

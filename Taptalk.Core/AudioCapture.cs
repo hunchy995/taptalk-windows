@@ -58,6 +58,12 @@ public sealed class AudioCapture : IDisposable
 
     public bool IsRecording { get; private set; }
 
+    /// <summary>Most recent chunk RMS (0..1), useful for live waveform/VU meters.</summary>
+    public float CurrentRms { get; private set; }
+
+    /// <summary>Most recent chunk peak (0..1), useful for live waveform/VU meters.</summary>
+    public float CurrentPeak { get; private set; }
+
     /// <summary>Approximate 16kHz-mono sample count (for the no-audio watchdog).</summary>
     public int TotalSamples
     {
@@ -116,6 +122,8 @@ public sealed class AudioCapture : IDisposable
             _negotiatedFormat = "";
             _firstChunkLogged = false;
             _isStopping = false;
+            CurrentRms = 0f;
+            CurrentPeak = 0f;
         }
 
         DebugRecorder.Log("REC", $"Initializing WASAPI capture: DeviceIdx={DeviceNumber} Name='{GetDeviceName(DeviceNumber)}'");
@@ -210,6 +218,8 @@ public sealed class AudioCapture : IDisposable
             _chunksSinceLog++;
             if (peak > _maxPeakInWindow) _maxPeakInWindow = peak;
             _rmsSum += rms;
+            CurrentRms = (float)rms;
+            CurrentPeak = peak;
 
             var now = DateTime.Now;
             if ((now - _lastAudioLogTime).TotalMilliseconds >= 1000)

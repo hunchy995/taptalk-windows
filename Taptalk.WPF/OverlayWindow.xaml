@@ -12,23 +12,49 @@
         WindowStartupLocation="Manual"
         Left="20" Top="20">
 
-    <Grid>
-        <Ellipse x:Name="PulseRing" Width="56" Height="56"
-                 Stroke="#007AFF" StrokeThickness="2" Opacity="0"
-                 IsHitTestVisible="False"/>
+    <Window.Resources>
+        <Storyboard x:Key="PulseStoryboard" RepeatBehavior="Forever" AutoReverse="True">
+            <DoubleAnimation Storyboard.TargetName="PulseRing"
+                            Storyboard.TargetProperty="(Canvas.RenderTransform).(ScaleTransform.ScaleX)"
+                            From="0.9" To="1.15" Duration="0:0:1.2" />
+            <DoubleAnimation Storyboard.TargetName="PulseRing"
+                            Storyboard.TargetProperty="(Canvas.RenderTransform).(ScaleTransform.ScaleY)"
+                            From="0.9" To="1.15" Duration="0:0:1.2" />
+            <DoubleAnimation Storyboard.TargetName="PulseRing"
+                            Storyboard.TargetProperty="Opacity"
+                            From="0.45" To="0.0" Duration="0:0:1.2" />
+        </Storyboard>
+    </Window.Resources>
 
+    <Grid>
+        <!-- Outer glow / ring -->
+        <Ellipse x:Name="PulseRing" Width="56" Height="56"
+                 Stroke="#E55B2B" StrokeThickness="2" Opacity="0"
+                 IsHitTestVisible="False" />
+
+        <!-- Main mic button -->
         <Ellipse x:Name="MicButton" Width="56" Height="56"
-                 Fill="#F2F2F7" Stroke="#E5E5EA" StrokeThickness="1"
+                 Fill="#FAF9F6" Stroke="#E5E5EA" StrokeThickness="1"
                  Cursor="Hand" MouseLeftButtonDown="MicButton_OnMouseDown"
                  MouseLeftButtonUp="MicButton_OnMouseUp"
-                 MouseMove="MicButton_OnMouseMove">
+                 MouseMove="MicButton_OnMouseMove"
+                 RenderTransformOrigin="0.5,0.5">
             <Ellipse.Effect>
-                <DropShadowEffect BlurRadius="12" ShadowDepth="2" Opacity="0.25" Color="Black"/>
+                <DropShadowEffect BlurRadius="16" ShadowDepth="0" Opacity="0.18" Color="Black" />
             </Ellipse.Effect>
+            <Ellipse.RenderTransform>
+                <ScaleTransform ScaleX="1" ScaleY="1" />
+            </Ellipse.RenderTransform>
         </Ellipse>
 
+        <!-- Microphone icon -->
         <TextBlock x:Name="MicIcon" Text="🎙️" FontSize="24"
                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                   IsHitTestVisible="False"/>
+                   IsHitTestVisible="False" />
+
+        <!-- Live audio waveform ring (small bars around the mic) -->
+        <Canvas x:Name="WaveformCanvas" Width="72" Height="72"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                IsHitTestVisible="False" Opacity="0.9" />
     </Grid>
 </Window>

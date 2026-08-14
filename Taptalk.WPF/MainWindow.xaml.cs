@@ -1,9 +1,14 @@
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using Taptalk.Core;
 using Taptalk.Engine.Parakeet;
 using Taptalk.Engine.Whisper;
@@ -32,12 +37,14 @@ public partial class MainWindow : Window
     private HotKeyManager? _hotKey;
     private OverlayWindow? _overlay;
     private System.Windows.Forms.NotifyIcon? _tray;
+    private System.Windows.Threading.DispatcherTimer? _waveformTimer;
 
     private RecordingState _state = RecordingState.Idle;
     private readonly object _stateLock = new();
 
     private bool _autoStop = true;
     private bool _autoPaste = true;
+    private bool _showOverlay = true;
     private readonly Stopwatch _sessionTimer = new();
     private bool _isPartialTranscribing;
     private bool _warnedNoAudio;
@@ -46,6 +53,7 @@ public partial class MainWindow : Window
     private System.Windows.Threading.DispatcherTimer? _partialTimer;
     private DateTime _lastPartial = DateTime.MinValue;
     private string _lastPartialText = "";
+    private string _lastModelDirectory = "";
 
     public MainWindow()
     {
@@ -75,10 +83,8 @@ public partial class MainWindow : Window
         }
 
         MicCombo.ItemsSource = devices;
-        MicCombo.SelectedIndex = 0; // Default to Windows Default Mic
+        MicCombo.SelectedIndex = 0;
         _capture.DeviceNumber = -1;
-
-        MicCombo.SelectionChanged += OnMicSelectionChanged;
 
         // 2. Restore persistent settings (engine, model path, options)
         LoadSettings();
@@ -97,19 +103,23 @@ public partial class MainWindow : Window
         // 4. Overlay window
         _overlay = new OverlayWindow();
         _overlay.OnTap += OnMicTap;
-        _overlay.OnDragEnd += () => { };
-        _overlay.Show();
+        _overlay.OnDragEnd += SaveOverlayPosition;
+        RestoreOverlayPosition();
+        if (_showOverlay) _overlay.Show();
+        else _overlay.Hide();
 
-        // 4. Global hotkey — Ctrl+Shift+Space (Alt+Space conflicts with the Windows system menu)
+        // 5. Global hotkey
+        var hwnd = new WindowInteropHelper(this).Handle;
         _hotKey = new HotKeyManager();
         _hotKey.OnHotKeyPressed += OnMicTap;
-        _hotKey.Register(new System.Windows.Interop.WindowInteropHelper(this).Handle);
+        _hotKey.Register(hwnd);
+        RefreshHotkeyStatus();
 
-        // 5. Tray icon
+        // 6. Tray icon
         _tray = new System.Windows.Forms.NotifyIcon
         {
             Icon = System.Drawing.SystemIcons.Application,
-            Text = "Taptalk — Ctrl+Shift+Space to record",
+            Text = $"Taptalk — {GetHotkeyLabel()} to record",
             Visible = true
         };
         _tray.DoubleClick += (_, _) => { Show(); WindowState = WindowState.Normal; Activate(); };
@@ -118,10 +128,28 @@ public partial class MainWindow : Window
         menu.Items.Add("Exit", null, (_, _) => Close());
         _tray.ContextMenuStrip = menu;
 
-        // 6. Audio chunks arrive on the NAudio thread — only do VAD math here, never touch UI
-        _capture.OnChunk += Chunk => CheckVad(Chunk);
+        // 7. Audio chunks arrive on the NAudio thread — only do VAD math here, never touch UI
+        _capture.OnChunk += CheckVad;
 
-        Log("Taptalk ready. Press Ctrl+Shift+Space or tap the overlay mic to record.");
+        // 8. Waveform meter timer for the overlay
+        _waveformTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(80)
+        };
+        _waveformTimer.Tick += (_, _) => _overlay?.UpdateWaveform(_capture.CurrentRms, _capture.CurrentPeak, _state == RecordingState.Recording);
+        _waveformTimer.Start();
+
+        // 9. Minimize to tray on launch if requested
+        if (MinimizeOnLaunchChk.IsChecked.GetValueOrDefault(false))
+        {
+            Hide();
+            _tray.Text = "Taptalk is running in the background";
+        }
+
+        // 10. Load history
+        RefreshHistoryList();
+
+        Log("Taptalk ready. " + GetHotkeyLabel() + " to record.");
     }
 
     private void OnMicSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -158,6 +186,7 @@ public partial class MainWindow : Window
             {
                 Log("⚠️ No model loaded — click Browse and select a model file first.");
                 Show();
+                WindowState = WindowState.Normal;
                 Activate();
                 return;
             }
@@ -182,7 +211,7 @@ public partial class MainWindow : Window
         _warnedNoAudio = false;
         _vad.Reset();
         _sessionTimer.Restart();
-        _engine?.ResetSession(); // fresh session gain for this recording
+        _engine?.ResetSession();
 
         // Remember which window had focus before we started, so we can type back into it after stop.
         // Give any brief focus shift from the hotkey a moment to settle.
@@ -358,6 +387,10 @@ public partial class MainWindow : Window
 
                 if (!string.IsNullOrWhiteSpace(cleaned))
                 {
+                    // Add to persistent history
+                    TranscriptionHistory.Add(cleaned);
+                    Dispatcher.BeginInvoke(RefreshHistoryList);
+
                     // Brief pause so the overlay/UI focus change settles before injecting
                     await Task.Delay(150);
 
@@ -389,10 +422,15 @@ public partial class MainWindow : Window
         _sessionTimer.Reset();
     }
 
-    /// <summary>Simple persistent settings stored in AppData\Local\Taptalk\settings.json</summary>
+    #region Settings persistence
+
     private string SettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Taptalk", "settings.json");
+
+    private string OverlayPositionPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Taptalk", "overlay.json");
 
     private void SaveSettings()
     {
@@ -407,7 +445,13 @@ public partial class MainWindow : Window
                 ["engineIndex"] = EngineCombo?.SelectedIndex ?? 0,
                 ["autoStop"] = AutoStopChk?.IsChecked ?? true,
                 ["autoPaste"] = AutoPasteChk?.IsChecked ?? true,
-                ["debug"] = DebugChk?.IsChecked ?? true
+                ["debug"] = DebugChk?.IsChecked ?? true,
+                ["showOverlay"] = ShowOverlayChk?.IsChecked ?? true,
+                ["minimizeOnLaunch"] = MinimizeOnLaunchChk?.IsChecked ?? false,
+                ["startupWithWindows"] = StartupChk?.IsChecked ?? false,
+                ["hotkeyModifiers"] = GetSelectedHotkeyModifiers(),
+                ["hotkeyKey"] = GetSelectedHotkeyKey(),
+                ["micIndex"] = (MicCombo?.SelectedItem as MicDevice)?.Index ?? -1
             };
             File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings));
         }
@@ -416,8 +460,6 @@ public partial class MainWindow : Window
             DebugRecorder.Log("CFG", $"Save settings failed: {ex.Message}");
         }
     }
-
-    private string _lastModelDirectory = "";
 
     private void LoadSettings()
     {
@@ -431,14 +473,19 @@ public partial class MainWindow : Window
             if (root.TryGetProperty("lastModelDirectory", out var d))
                 _lastModelDirectory = d.GetString() ?? "";
 
-            if (root.TryGetProperty("lastModelPath", out var p) && File.Exists(p.GetString() ?? ""))
+            // Load model path if the file still exists; otherwise keep the directory so Browse lands there.
+            if (root.TryGetProperty("lastModelPath", out var p))
             {
-                ModelPathBox.Text = p.GetString()!;
-                LoadEngine();
+                var path = p.GetString() ?? "";
+                if (!string.IsNullOrEmpty(path))
+                {
+                    ModelPathBox.Text = path;
+                    if (File.Exists(path)) LoadEngine();
+                }
             }
 
             if (root.TryGetProperty("engineIndex", out var e) && EngineCombo != null)
-                EngineCombo.SelectedIndex = e.GetInt32();
+                EngineCombo.SelectedIndex = Math.Max(0, Math.Min(e.GetInt32(), EngineCombo.Items.Count - 1));
 
             if (root.TryGetProperty("autoStop", out var a) && AutoStopChk != null)
                 AutoStopChk.IsChecked = a.GetBoolean();
@@ -448,6 +495,40 @@ public partial class MainWindow : Window
 
             if (root.TryGetProperty("debug", out var dbg) && DebugChk != null)
                 DebugChk.IsChecked = dbg.GetBoolean();
+
+            if (root.TryGetProperty("showOverlay", out var so) && ShowOverlayChk != null)
+            {
+                _showOverlay = so.GetBoolean();
+                ShowOverlayChk.IsChecked = _showOverlay;
+            }
+
+            if (root.TryGetProperty("minimizeOnLaunch", out var mol) && MinimizeOnLaunchChk != null)
+                MinimizeOnLaunchChk.IsChecked = mol.GetBoolean();
+
+            if (root.TryGetProperty("startupWithWindows", out var sw) && StartupChk != null)
+                StartupChk.IsChecked = sw.GetBoolean();
+
+            // Restore hotkey
+            uint mods = HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_SHIFT;
+            uint key = HotKeyManager.VK_SPACE;
+            if (root.TryGetProperty("hotkeyModifiers", out var hm))
+            {
+                var raw = hm.GetUInt32();
+                if ((raw & (HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_ALT | HotKeyManager.MOD_SHIFT | HotKeyManager.MOD_WIN)) != 0)
+                    mods = raw;
+            }
+            if (root.TryGetProperty("hotkeyKey", out var hk))
+                key = hk.GetUInt32();
+            SelectHotkeyInUi(mods, key);
+
+            // Restore microphone
+            if (root.TryGetProperty("micIndex", out var mi) && MicCombo != null)
+            {
+                int savedIndex = mi.GetInt32();
+                var items = MicCombo.ItemsSource as List<MicDevice>;
+                var match = items?.FirstOrDefault(x => x.Index == savedIndex);
+                MicCombo.SelectedItem = match ?? items?.FirstOrDefault();
+            }
         }
         catch (Exception ex)
         {
@@ -455,13 +536,16 @@ public partial class MainWindow : Window
         }
     }
 
+    #endregion
+
+    #region UI helpers
+
     private void Log(string msg)
     {
         if (LogBox == null) return; // may fire during InitializeComponent before LogBox exists
         Dispatcher.Invoke(() => LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}\n"));
     }
 
-    /// <summary>Called from DebugRecorder (any thread) — marshals to UI, filters verbose tags, caps length.</summary>
     private void AppendDebugLine(string line)
     {
         if (!Dispatcher.CheckAccess())
@@ -470,7 +554,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (LogBox == null) return; // during InitializeComponent, LogBox not built yet
+        if (LogBox == null) return;
 
         // Filter verbose tags when debug checkbox is off
         if (!DebugChk.IsChecked.GetValueOrDefault(true))
@@ -492,6 +576,17 @@ public partial class MainWindow : Window
         LogBox.ScrollToEnd();
     }
 
+    private void RefreshHistoryList()
+    {
+        if (HistoryList == null) return;
+        var items = TranscriptionHistory.Load();
+        HistoryList.ItemsSource = items;
+    }
+
+    #endregion
+
+    #region Event handlers
+
     private void DebugChk_Changed(object sender, RoutedEventArgs e)
     {
         if (DebugChk == null) return;
@@ -505,6 +600,13 @@ public partial class MainWindow : Window
     {
         LogBox.Clear();
         Log("Log cleared — full history is in " + Taptalk.Core.DebugRecorder.Instance.LogFilePath);
+    }
+
+    private void ClearHistoryBtn_Click(object sender, RoutedEventArgs e)
+    {
+        TranscriptionHistory.Clear();
+        RefreshHistoryList();
+        Log("History cleared");
     }
 
     private void EngineCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -523,6 +625,8 @@ public partial class MainWindow : Window
             Filter = "Model files (*.onnx;*.bin;*.gguf)|*.onnx;*.bin;*.gguf|All files (*.*)|*.*",
             Title = "Select ASR model"
         };
+
+        // Always restore the last model directory, even if the saved file moved.
         if (!string.IsNullOrEmpty(_lastModelDirectory) && Directory.Exists(_lastModelDirectory))
             dlg.InitialDirectory = _lastModelDirectory;
 
@@ -594,6 +698,35 @@ public partial class MainWindow : Window
         SaveSettings();
     }
 
+    private void ShowOverlayChk_Checked(object sender, RoutedEventArgs e)
+    {
+        _showOverlay = ShowOverlayChk.IsChecked.GetValueOrDefault(true);
+        if (_overlay != null)
+        {
+            if (_showOverlay)
+            {
+                _overlay.Show();
+                _overlay.SetIdle();
+            }
+            else
+            {
+                _overlay.Hide();
+            }
+        }
+        SaveSettings();
+    }
+
+    private void MinimizeOnLaunchChk_Checked(object sender, RoutedEventArgs e)
+    {
+        SaveSettings();
+    }
+
+    private void StartupChk_Checked(object sender, RoutedEventArgs e)
+    {
+        StartupManager.SetStartupEnabled(StartupChk.IsChecked.GetValueOrDefault(false));
+        SaveSettings();
+    }
+
     private void MicSettingsBtn_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -610,7 +743,6 @@ public partial class MainWindow : Window
     {
         try
         {
-            // Opens the Windows Sound panel → Recording tab (mic input level / boost)
             System.Diagnostics.Process.Start(new ProcessStartInfo("control", "mmsys.cpl,,recording") { UseShellExecute = true });
         }
         catch (Exception ex)
@@ -621,7 +753,6 @@ public partial class MainWindow : Window
 
     private void FixMicLevelBtn_Click(object sender, RoutedEventArgs e)
     {
-        // Raising the Windows mic level affects EVERY app using this mic — get explicit consent
         var before = _capture.EndpointLevelScalar;
         var confirm = System.Windows.MessageBox.Show(
             $"Your microphone level is {before:P0} in Windows. This is why Taptalk hears almost nothing.\n\n" +
@@ -644,12 +775,141 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        SaveOverlayPosition();
+        _waveformTimer?.Stop();
         _hotKey?.Unregister();
         _tray?.Dispose();
         _capture.Dispose();
         _engine?.Dispose();
         _overlay?.Close();
     }
+
+    #endregion
+
+    #region Hotkey UI
+
+    private uint GetSelectedHotkeyModifiers()
+    {
+        return HotkeyModifierCombo.SelectedIndex switch
+        {
+            0 => HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_SHIFT,
+            1 => HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_ALT,
+            2 => HotKeyManager.MOD_ALT | HotKeyManager.MOD_SHIFT,
+            3 => HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_ALT | HotKeyManager.MOD_SHIFT,
+            _ => HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_SHIFT
+        };
+    }
+
+    private uint GetSelectedHotkeyKey()
+    {
+        var text = HotkeyKeyBox.Text?.Trim();
+        if (string.IsNullOrEmpty(text)) return HotKeyManager.VK_SPACE;
+        if (text.Equals("Space", StringComparison.OrdinalIgnoreCase)) return HotKeyManager.VK_SPACE;
+        var c = text[0];
+        var vk = HotKeyManager.ParseKeyChar(c);
+        return vk != 0 ? vk : HotKeyManager.VK_SPACE;
+    }
+
+    private void SelectHotkeyInUi(uint modifiers, uint key)
+    {
+        if (HotkeyModifierCombo == null || HotkeyKeyBox == null) return;
+
+        int index = (modifiers & (HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_ALT | HotKeyManager.MOD_SHIFT)) switch
+        {
+            HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_SHIFT => 0,
+            HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_ALT => 1,
+            HotKeyManager.MOD_ALT | HotKeyManager.MOD_SHIFT => 2,
+            HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_ALT | HotKeyManager.MOD_SHIFT => 3,
+            _ => 0
+        };
+        HotkeyModifierCombo.SelectedIndex = index;
+        HotkeyKeyBox.Text = HotKeyManager.FormatVirtualKey(key);
+    }
+
+    private void RefreshHotkeyStatus()
+    {
+        if (_hotKey == null) return;
+        var label = HotKeyManager.FormatHotKey(_hotKey.Modifiers, _hotKey.VirtualKey);
+        HotkeyStatusText.Text = $"Active: {label}";
+        if (_tray != null) _tray.Text = $"Taptalk — {label} to record";
+    }
+
+    private string GetHotkeyLabel()
+    {
+        if (_hotKey == null) return HotKeyManager.FormatHotKey(HotKeyManager.MOD_CONTROL | HotKeyManager.MOD_SHIFT, HotKeyManager.VK_SPACE);
+        return HotKeyManager.FormatHotKey(_hotKey.Modifiers, _hotKey.VirtualKey);
+    }
+
+    private void ApplyHotkeyFromUi()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var mods = GetSelectedHotkeyModifiers();
+        var key = GetSelectedHotkeyKey();
+        _hotKey?.SetHotKey(hwnd, mods, key);
+        RefreshHotkeyStatus();
+        Log($"🎹 Hotkey set to {GetHotkeyLabel()}");
+    }
+
+    private void HotkeyCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        ApplyHotkeyFromUi();
+        SaveSettings();
+    }
+
+    private void HotkeyKeyBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        ApplyHotkeyFromUi();
+        SaveSettings();
+    }
+
+    #endregion
+
+    #region Overlay position persistence
+
+    private void SaveOverlayPosition()
+    {
+        if (_overlay == null) return;
+        try
+        {
+            var dir = Path.GetDirectoryName(OverlayPositionPath)!;
+            Directory.CreateDirectory(dir);
+            var pos = new Dictionary<string, double>
+            {
+                ["left"] = _overlay.Left,
+                ["top"] = _overlay.Top
+            };
+            File.WriteAllText(OverlayPositionPath, JsonSerializer.Serialize(pos));
+        }
+        catch (Exception ex)
+        {
+            DebugRecorder.Log("CFG", $"Save overlay position failed: {ex.Message}");
+        }
+    }
+
+    private void RestoreOverlayPosition()
+    {
+        if (_overlay == null) return;
+        try
+        {
+            if (!File.Exists(OverlayPositionPath)) return;
+            var json = File.ReadAllText(OverlayPositionPath);
+            var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("left", out var l) && root.TryGetProperty("top", out var t))
+            {
+                _overlay.Left = l.GetDouble();
+                _overlay.Top = t.GetDouble();
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugRecorder.Log("CFG", $"Restore overlay position failed: {ex.Message}");
+        }
+    }
+
+    #endregion
 
     // ---------- Win32 focus helpers ----------
 
