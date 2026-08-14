@@ -1,7 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Windows;
+using System.Threading;
 
 namespace Taptalk.WPF;
 
@@ -13,11 +14,29 @@ namespace Taptalk.WPF;
 /// </summary>
 public static class TextInjector
 {
+    // --- Win32 INPUT union: must match native size exactly. ---
+    // On x64 the union is sized for MOUSEINPUT (32 bytes), so sizeof(INPUT) is 40.
+    // A sequential struct containing only KEYBDINPUT is only 32 bytes and makes
+    // SendInput fail with ERROR_INVALID_PARAMETER (87) on 64-bit Windows.
+
     [StructLayout(LayoutKind.Sequential)]
     private struct INPUT
     {
-        public int type;
+        public uint type;
+        public InputUnion U;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputUnion
+    {
+        [FieldOffset(0)]
         public KEYBDINPUT ki;
+
+        [FieldOffset(0)]
+        public MOUSEINPUT mi;
+
+        [FieldOffset(0)]
+        public HARDWAREINPUT hi;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -30,14 +49,32 @@ public static class TextInjector
         public IntPtr dwExtraInfo;
     }
 
-    private const int INPUT_KEYBOARD = 1;
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HARDWAREINPUT
+    {
+        public uint uMsg;
+        public ushort wParamL;
+        public ushort wParamH;
+    }
+
+    private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_UNICODE = 0x0004;
     private const uint KEYEVENTF_KEYUP = 0x0002;
     private const uint KEYEVENTF_SCANCODE = 0x0008;
     private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
 
     private const ushort VK_SHIFT = 0x10;
-    private const ushort VK_LSHIFT = 0xA0;
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
@@ -76,7 +113,21 @@ public static class TextInjector
         {
             if (targetHwnd != IntPtr.Zero)
             {
-                SetForegroundWindow(targetHwnd);
+                IntPtr activeHwnd = GetForegroundWindow();
+                if (activeHwnd != targetHwnd)
+                {
+                    bool activated = SetForegroundWindow(targetHwnd);
+                    if (activated)
+                    {
+                        // Yield so the target thread receives focus before keystrokes arrive.
+                        Thread.Sleep(50);
+                    }
+                    else
+                    {
+                        Taptalk.Core.DebugRecorder.Log("INJ", "Warning: SetForegroundWindow returned false. Focus may be locked.");
+                    }
+                }
+
                 var sb = new StringBuilder(256);
                 if (GetWindowText(targetHwnd, sb, 256) > 0) target = sb.ToString();
             }
@@ -85,7 +136,10 @@ public static class TextInjector
                 target = GetForegroundWindowTitle();
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Taptalk.Core.DebugRecorder.Log("INJ", $"Focus error: {ex.Message}");
+        }
 
         Taptalk.Core.DebugRecorder.Log("INJ", $"Typing {text.Length} chars into active window '{target}': \"{text}\"");
         SendTextAsKeyboard(text);
@@ -96,7 +150,7 @@ public static class TextInjector
     {
         try
         {
-            var hwnd = GetForegroundWindow();
+            IntPtr hwnd = GetForegroundWindow();
             if (hwnd != IntPtr.Zero)
             {
                 var sb = new StringBuilder(256);
@@ -148,11 +202,13 @@ public static class TextInjector
         if (inputs.Count == 0) return;
 
         var arr = inputs.ToArray();
-        uint sent = SendInput((uint)arr.Length, arr, Marshal.SizeOf<INPUT>());
+        int structSize = Marshal.SizeOf<INPUT>();
+
+        uint sent = SendInput((uint)arr.Length, arr, structSize);
         if (sent != arr.Length)
         {
             int err = Marshal.GetLastWin32Error();
-            Taptalk.Core.DebugRecorder.Log("INJ", $"SendInput sent {sent}/{arr.Length}, last error={err}");
+            Taptalk.Core.DebugRecorder.Log("INJ", $"SendInput sent {sent}/{arr.Length}, last error={err}, expected struct size={structSize} ({IntPtr.Size * 8}-bit)");
         }
     }
 
@@ -160,16 +216,21 @@ public static class TextInjector
     {
         uint flags = extraFlags;
         if (up) flags |= KEYEVENTF_KEYUP;
-        if (vk == 0) flags |= KEYEVENTF_UNICODE; // scan-only fallback safety
+        if (vk == 0) flags |= KEYEVENTF_UNICODE;
 
         return new INPUT
         {
             type = INPUT_KEYBOARD,
-            ki = new KEYBDINPUT
+            U = new InputUnion
             {
-                wVk = (ushort)vk,
-                wScan = scan,
-                dwFlags = flags
+                ki = new KEYBDINPUT
+                {
+                    wVk = (ushort)vk,
+                    wScan = scan,
+                    dwFlags = flags,
+                    time = 0,
+                    dwExtraInfo = IntPtr.Zero
+                }
             }
         };
     }
@@ -179,10 +240,16 @@ public static class TextInjector
         return new INPUT
         {
             type = INPUT_KEYBOARD,
-            ki = new KEYBDINPUT
+            U = new InputUnion
             {
-                wScan = c,
-                dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0)
+                ki = new KEYBDINPUT
+                {
+                    wVk = 0,
+                    wScan = c,
+                    dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0u),
+                    time = 0,
+                    dwExtraInfo = IntPtr.Zero
+                }
             }
         };
     }
