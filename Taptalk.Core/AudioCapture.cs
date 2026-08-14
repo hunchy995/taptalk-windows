@@ -343,7 +343,6 @@ public sealed class AudioCapture : IDisposable
                 if (sessions == null) return;
 
                 uint targetPid = (uint)Environment.ProcessId;
-                bool sessionFound = false;
 
                 // Index-based loop — foreach on COM session collection can throw if sessions churn
                 for (int i = 0; i < sessions.Count; i++)
@@ -354,7 +353,6 @@ public sealed class AudioCapture : IDisposable
                         if (session == null) continue;
                         if (session.GetProcessID == targetPid)
                         {
-                            sessionFound = true;
                             var sav = session.SimpleAudioVolume;
                             if (sav != null)
                             {
