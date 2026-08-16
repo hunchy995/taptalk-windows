@@ -6,7 +6,8 @@ Port of the TapType Android app to Windows 10/11. Floating mic overlay → recor
 
 | Engine | Backend | Default | Notes |
 |--------|---------|---------|-------|
-| **Parakeet (GPU)** | ONNX Runtime + DirectML | ✅ | Uses ANY GPU (AMD/NVIDIA/Intel). Real-time streaming. |
+| **Parakeet (GPU)** | ONNX Runtime + DirectML | ✅ | CTC architecture, English. Uses ANY GPU (AMD/NVIDIA/Intel). |
+| **Parakeet TDT (GPU)** | ONNX Runtime + DirectML | — | TDT architecture, 25 languages, better accuracy. |
 | **Whisper (CPU)** | whisper.cpp DLL (AVX-512/AVX2) | Fallback | Built from source with CPU optimizations. |
 
 ## How to get the installer (easiest)
@@ -49,6 +50,18 @@ Download: https://huggingface.co/istupakov/parakeet-ctc-0.6b-onnx
 - **Also download `vocab.txt` from the same page** and put it in the SAME folder as `model.int8.onnx` (the app loads it automatically — without it, transcription comes back empty)
 - ⚠️ Do NOT use the small `model.onnx` (~41MB) unless you also download its external `model.onnx.data` file (~2.4GB); otherwise the model won't load
 - In the app: Settings → Engine: Parakeet → Browse → select `model.int8.onnx`
+
+### Parakeet TDT (0.6B v3, multilingual)
+Download: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
+
+TDT is a split two-network model — you need **three files in the same folder**:
+- **`encoder-model.onnx`** (42MB) + **`encoder-model.onnx.data`** (2.4GB) — the FP32 encoder (recommended for AMD GPUs), **or** `encoder-model.int8.onnx` (652MB) if the int8 path works on your GPU
+- **`decoder_joint-model.onnx`** (72MB) — the joint decoder (use `decoder_joint-model.int8.onnx` only if you used the int8 encoder)
+- **`vocab.txt`** — the token vocabulary (loads automatically)
+
+In the app: Settings → Engine: **Parakeet TDT** → Browse → select the **encoder** file (`encoder-model.onnx`). The decoder and vocab are auto-discovered from the same folder.
+
+> ⚠️ On AMD Radeon GPUs the **int8** encoder can silently produce NaN logits via DirectML (same issue as the CTC int8 model). Prefer the **FP32** pair (`encoder-model.onnx` + `.data`) — 64GB RAM makes the 2.4GB weights a non-issue.
 
 ### Whisper
 Download any GGML model: https://huggingface.co/ggerganov/whisper.cpp/tree/main
