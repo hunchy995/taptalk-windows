@@ -86,9 +86,17 @@ public sealed class TdtEngine : ISttEngine
         try
         {
             var dmlEncoder = BuildDmlOptions();
-            var dmlDecoder = BuildDmlOptions();
+            // Decoder joint is kept on CPU: INT8-quantized decoder_joint models
+            // produce NaN logits under DirectML on AMD GPUs (observed with
+            // istupakov/parakeet-tdt-0.6b-v3-onnx), while the encoder runs
+            // correctly on DirectML.
+            var cpuDecoder = new SessionOptions
+            {
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL
+            };
             _encoder = new InferenceSession(encoderPath, dmlEncoder);
-            _decoderJoint = new InferenceSession(decoderPath, dmlDecoder);
+            _decoderJoint = new InferenceSession(decoderPath, cpuDecoder);
             ReadMetadata();
             LoadVocab(vocabPath);
             LogMetadata();
