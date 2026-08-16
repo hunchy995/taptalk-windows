@@ -21,15 +21,18 @@ public sealed class MelScaleFeaturizer
     public const int WindowSize = 400;   // win_length
     public const int HopLength = 160;
     public const int FftSize = 512;      // n_fft
-    public const int MelBands = 80;
     public const float Preemphasis = 0.97f;
     public const float LogZeroGuard = 5.96046448e-08f; // 2^-24
 
-    private readonly float[] _window = new float[FftSize];
-    private readonly float[,] _melFilterbank; // [257, 80]
+    /// <summary>Number of mel bands (80 for CTC Parakeet, 128 for TDT Parakeet).</summary>
+    public int MelBands { get; }
 
-    public MelScaleFeaturizer()
+    private readonly float[] _window = new float[FftSize];
+    private readonly float[,] _melFilterbank; // [257, MelBands]
+
+    public MelScaleFeaturizer(int melBands = 80)
     {
+        MelBands = melBands;
         // 400-point symmetric Hann window, then zero-pad to 512 (centered).
         var hann400 = CreateHannWindow(WindowSize);
         int pad = (FftSize - WindowSize) / 2; // 56

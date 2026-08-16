@@ -648,19 +648,34 @@ public partial class MainWindow : Window
             _engine?.Dispose();
             _engine = null;
 
-            if (EngineCombo.SelectedIndex == 0)  // Parakeet GPU
+            if (EngineCombo.SelectedIndex == 0)  // Parakeet CTC GPU
             {
                 var parakeet = new ParakeetEngine(path);
                 if (parakeet.LoadModel(path))
                 {
                     _engine = parakeet;
-                    ModelStatusText.Text = $"✅ Parakeet loaded on GPU (DirectML) — {new FileInfo(path).Length / 1e6:F0}MB";
-                    Log("✅ Parakeet engine ready (GPU/DirectML)");
+                    ModelStatusText.Text = $"✅ Parakeet CTC loaded on GPU (DirectML) — {new FileInfo(path).Length / 1e6:F0}MB";
+                    Log("✅ Parakeet CTC engine ready (GPU/DirectML)");
                 }
                 else
                 {
-                    ModelStatusText.Text = "❌ Failed to load Parakeet model";
-                    Log("❌ Parakeet load failed");
+                    ModelStatusText.Text = "❌ Failed to load Parakeet CTC model";
+                    Log("❌ Parakeet CTC load failed");
+                }
+            }
+            else if (EngineCombo.SelectedIndex == 1)  // Parakeet TDT GPU
+            {
+                var tdt = new TdtEngine(path);
+                if (tdt.LoadModel(path))
+                {
+                    _engine = tdt;
+                    ModelStatusText.Text = "✅ Parakeet TDT loaded on GPU (DirectML)";
+                    Log("✅ Parakeet TDT engine ready (GPU/DirectML)");
+                }
+                else
+                {
+                    ModelStatusText.Text = "❌ Failed to load Parakeet TDT model — needs encoder + decoder_joint + vocab.txt in the same folder";
+                    Log("❌ Parakeet TDT load failed — select the encoder-model.onnx file");
                 }
             }
             else  // Whisper CPU

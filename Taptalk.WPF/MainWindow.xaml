@@ -112,6 +112,7 @@
                         <TextBlock Text="Engine" Style="{StaticResource SubText}" Margin="0,0,0,2" />
                         <ComboBox x:Name="EngineCombo" SelectedIndex="0" SelectionChanged="EngineCombo_SelectionChanged">
                             <ComboBoxItem Content="Parakeet (GPU — DirectML)" />
+                            <ComboBoxItem Content="Parakeet TDT (GPU — DirectML)" />
                             <ComboBoxItem Content="Whisper (CPU — whisper.cpp)" />
                         </ComboBox>
 

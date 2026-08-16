@@ -213,14 +213,14 @@ public sealed class ParakeetEngine : ISttEngine
     private string RunInferenceCore(float[] features, int rawSamples)
     {
         int total = features.Length;
-        if (total == 0 || total % MelScaleFeaturizer.MelBands != 0)
+        if (total == 0 || total % _featurizer.MelBands != 0)
         {
             DebugRecorder.Log("ERR", $"Invalid feature tensor length {total}");
             return "";
         }
 
-        int frames = total / MelScaleFeaturizer.MelBands;
-        int melBins = MelScaleFeaturizer.MelBands;
+        int frames = total / _featurizer.MelBands;
+        int melBins = _featurizer.MelBands;
 
         using var inputTensor = OrtValue.CreateTensorValueFromMemory(features, new long[] { 1, melBins, frames });
 
