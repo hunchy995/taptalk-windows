@@ -14,10 +14,22 @@
     <ProjectReference Include="..\Taptalk.Core\Taptalk.Core.csproj" />
   </ItemGroup>
 
-  <!-- Native whisper.dll must be copied to output -->
+  <!-- Native whisper.dll + its ggml dependencies must be copied to output -->
   <ItemGroup>
     <None Include="..\native\build\bin\Release\whisper.dll" Condition="Exists('..\native\build\bin\Release\whisper.dll')">
       <Link>whisper.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\native\build\bin\ggml.dll" Condition="Exists('..\native\build\bin\ggml.dll')">
+      <Link>ggml.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\native\build\bin\ggml-cpu.dll" Condition="Exists('..\native\build\bin\ggml-cpu.dll')">
+      <Link>ggml-cpu.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\native\build\bin\ggml-base.dll" Condition="Exists('..\native\build\bin\ggml-base.dll')">
+      <Link>ggml-base.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

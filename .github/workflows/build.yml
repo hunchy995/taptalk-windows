@@ -37,15 +37,29 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DGGML_OPENMP=OFF -DWHISPER_SRC_DIR="$env:GITHUB_WORKSPACE\whisper.cpp" -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_SERVER=OFF
           cmake --build build --target whisper
 
-      - name: Copy whisper.dll to engine output
-        run: |
-          New-Item -ItemType Directory -Force -Path "Taptalk.Engine.Whisper\bin\Release"
-          Copy-Item "native\build\bin\Release\whisper.dll" "Taptalk.Engine.Whisper\bin\Release\whisper.dll" -Force
-
       - name: Restore + Build solution (Release x64)
         run: |
           dotnet restore Taptalk.sln
           dotnet publish Taptalk.WPF -c Release -r win-x64 --self-contained true -o publish
+
+      - name: Copy whisper + ggml runtime DLLs into publish
+        run: |
+          Copy-Item "native\build\bin\Release\whisper.dll" "publish\whisper.dll" -Force
+          Copy-Item "native\build\bin\ggml.dll" "publish\ggml.dll" -Force
+          Copy-Item "native\build\bin\ggml-cpu.dll" "publish\ggml-cpu.dll" -Force
+          Copy-Item "native\build\bin\ggml-base.dll" "publish\ggml-base.dll" -Force
+
+      - name: Verify whisper.dll dependencies (dumpbin)
+        run: |
+          $db = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if ($db) {
+            Write-Host "dumpbin: $db"
+            & $db /dependents "publish\whisper.dll"
+            Write-Host "--- whisper/ggml DLLs present in publish ---"
+            Get-ChildItem publish -Filter "*.dll" | Where-Object { $_.Name -match "ggml|whisper" } | ForEach-Object { Write-Host $_.Name }
+          } else {
+            Write-Host "dumpbin not found - skipping dependency check"
+          }
 
       - name: Install Inno Setup
         run: choco install innosetup -y

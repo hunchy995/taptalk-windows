@@ -3,7 +3,7 @@
 ;   iscc /DAppDir="..\publish" Taptalk.iss
 
 #define MyAppName "Taptalk"
-#define MyAppVersion "1.0.14"
+#define MyAppVersion "1.0.15"
 #define MyAppPublisher "Aziz"
 #define MyAppExeName "Taptalk.WPF.exe"
 
