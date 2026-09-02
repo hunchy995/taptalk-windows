@@ -3,6 +3,7 @@ name: Build Taptalk Windows Installer
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -30,7 +31,7 @@ jobs:
       - name: Build whisper.dll (AVX-512, static CRT)
         working-directory: native
         run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWHISPER_SRC_DIR="$env:GITHUB_WORKSPACE\whisper.cpp" -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_SERVER=OFF
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DGGML_OPENMP=OFF -DWHISPER_SRC_DIR="$env:GITHUB_WORKSPACE\whisper.cpp" -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_SERVER=OFF
           cmake --build build --target whisper
 
       - name: Copy whisper.dll to engine output
