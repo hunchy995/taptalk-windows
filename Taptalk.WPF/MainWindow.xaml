@@ -147,9 +147,7 @@
                     <StackPanel>
                         <TextBlock Text="Recording Options" Style="{StaticResource SectionHeader}" />
 
-                        <CheckBox x:Name="AutoStopChk" Content="Auto-stop on silence" IsChecked="True" Checked="AutoStopChk_Checked" Unchecked="AutoStopChk_Checked" />
                         <CheckBox x:Name="AutoPasteChk" Content="Auto-type after stop" IsChecked="True" Checked="AutoPasteChk_Checked" Unchecked="AutoPasteChk_Checked" ToolTip="Type the transcription directly into whatever window had focus after recording stops" />
-                        <CheckBox x:Name="ShowOverlayChk" Content="Show floating mic overlay" IsChecked="True" Checked="ShowOverlayChk_Checked" Unchecked="ShowOverlayChk_Checked" ToolTip="You can still use the global hotkey when the overlay is hidden" />
                         <CheckBox x:Name="MinimizeOnLaunchChk" Content="Minimize to tray on launch" IsChecked="False" Checked="MinimizeOnLaunchChk_Checked" Unchecked="MinimizeOnLaunchChk_Checked" />
                         <CheckBox x:Name="StartupChk" Content="Start Taptalk with Windows" IsChecked="False" Checked="StartupChk_Checked" Unchecked="StartupChk_Checked" />
 

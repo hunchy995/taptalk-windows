@@ -32,19 +32,14 @@ public class MicDevice
 public partial class MainWindow : Window
 {
     private readonly AudioCapture _capture = new();
-    private readonly VADDetector _vad;
     private ISttEngine? _engine;
     private HotKeyManager? _hotKey;
-    private OverlayWindow? _overlay;
     private System.Windows.Forms.NotifyIcon? _tray;
-    private System.Windows.Threading.DispatcherTimer? _waveformTimer;
 
     private RecordingState _state = RecordingState.Idle;
     private readonly object _stateLock = new();
 
-    private bool _autoStop = true;
     private bool _autoPaste = true;
-    private bool _showOverlay = true;
     private readonly Stopwatch _sessionTimer = new();
     private bool _isPartialTranscribing;
     private bool _warnedNoAudio;
@@ -58,7 +53,6 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        _vad = new VADDetector(_capture);
         Loaded += OnLoaded;
         Closing += OnClosing;
     }
@@ -100,15 +94,7 @@ public partial class MainWindow : Window
             });
         };
 
-        // 4. Overlay window
-        _overlay = new OverlayWindow();
-        _overlay.OnTap += OnMicTap;
-        _overlay.OnDragEnd += SaveOverlayPosition;
-        RestoreOverlayPosition();
-        if (_showOverlay) _overlay.Show();
-        else _overlay.Hide();
-
-        // 5. Global hotkey
+        // 4. Global hotkey
         var hwnd = new WindowInteropHelper(this).Handle;
         _hotKey = new HotKeyManager();
         _hotKey.OnHotKeyPressed += OnMicTap;
@@ -128,18 +114,10 @@ public partial class MainWindow : Window
         menu.Items.Add("Exit", null, (_, _) => Close());
         _tray.ContextMenuStrip = menu;
 
-        // 7. Audio chunks arrive on the NAudio thread — only do VAD math here, never touch UI
-        _capture.OnChunk += CheckVad;
+        // 7. Audio chunks arrive on the NAudio thread — watchdog only (no auto-stop), never touch UI
+        _capture.OnChunk += OnAudioChunk;
 
-        // 8. Waveform meter timer for the overlay
-        _waveformTimer = new System.Windows.Threading.DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(80)
-        };
-        _waveformTimer.Tick += (_, _) => _overlay?.UpdateWaveform(_capture.CurrentRms, _capture.CurrentPeak, _state == RecordingState.Recording);
-        _waveformTimer.Start();
-
-        // 9. Minimize to tray on launch if requested
+        // 8. Minimize to tray on launch if requested
         if (MinimizeOnLaunchChk.IsChecked.GetValueOrDefault(false))
         {
             Hide();
@@ -209,7 +187,6 @@ public partial class MainWindow : Window
     {
         _state = RecordingState.Recording;
         _warnedNoAudio = false;
-        _vad.Reset();
         _sessionTimer.Restart();
         _engine?.ResetSession();
 
@@ -231,7 +208,6 @@ public partial class MainWindow : Window
         try
         {
             _capture.Start();
-            _overlay?.SetRecording();
             StartPartialTimer();
             Log($"🎤 Recording started ({DateTime.Now:HH:mm:ss})");
 
@@ -258,61 +234,33 @@ public partial class MainWindow : Window
         }
     }
 
-    private void CheckVad(float[] chunk)
+    private void OnAudioChunk(float[] chunk)
     {
         // Called on the NAudio thread — NO UI access here. Pure math only.
         try
         {
-            CheckVadCore(chunk);
+            // Watchdog only: recording but almost no audio for 2.5s → likely muted/blocked mic.
+            // (Auto-stop on silence was removed — recording is stopped manually via hotkey.)
+            if (_state != RecordingState.Recording) return;
+
+            float peak = 0f;
+            foreach (var v in chunk) { var a = MathF.Abs(v); if (a > peak) peak = a; }
+
+            if (!_warnedNoAudio && _sessionTimer.ElapsedMilliseconds > 2500 && (peak < 0.001f || _capture.TotalSamples < 4000))
+            {
+                _warnedNoAudio = true;
+                Dispatcher.BeginInvoke(() =>
+                {
+                    Log("⚠️ No audio detected — check your physical microphone mute button or Windows mic level.");
+                    MicStatusText.Text = "No audio data is reaching Taptalk. Verify your mic input levels.";
+                });
+            }
         }
         catch (Exception ex)
         {
             // A stale DataAvailable callback after Stop/Dispose is a documented NAudio
             // hazard — NEVER let an exception escape the wave thread (fatal, no hook).
-            DebugRecorder.Log("ERR", $"CheckVad: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    private void CheckVadCore(float[] chunk)
-    {
-        if (_state != RecordingState.Recording) return;
-
-        // Watchdog: recording but almost no audio for 2.5s → likely muted/blocked mic.
-        // chunk[] is the latest native-format samples; compute its peak cheaply for diagnostics.
-        float peak = 0f;
-        foreach (var v in chunk) { var a = MathF.Abs(v); if (a > peak) peak = a; }
-
-        if (!_warnedNoAudio && _sessionTimer.ElapsedMilliseconds > 2500 && (peak < 0.001f || _capture.TotalSamples < 4000))
-        {
-            _warnedNoAudio = true;
-            Dispatcher.BeginInvoke(() =>
-            {
-                Log("⚠️ No audio detected — check your physical microphone mute button or Windows mic level.");
-                MicStatusText.Text = "No audio data is reaching Taptalk. Verify your mic input levels.";
-            });
-        }
-
-        if (!_autoStop) return;
-        if (_sessionTimer.ElapsedMilliseconds < 1500) return;
-
-        // Use the incoming native-rate chunk for VAD — never resample the whole growing
-        // buffer here. That was an O(N^2) performance leak that could starve the audio thread.
-        var rms = _vad.GetRMS(chunk);
-        if (_vad.Check(rms, (int)_sessionTimer.ElapsedMilliseconds))
-        {
-            DebugRecorder.Log("VAD", $"Silence limit reached at {_sessionTimer.ElapsedMilliseconds}ms — auto-stop");
-            // Marshal the stop back to the UI thread — NEVER stop NAudio from its own callback
-            Dispatcher.BeginInvoke(new Action(() =>
-            {
-                lock (_stateLock)
-                {
-                    if (_state == RecordingState.Recording)
-                    {
-                        Log("🔇 Silence detected — auto-stop");
-                        _ = StopAndTranscribeAsync();
-                    }
-                }
-            }));
+            DebugRecorder.Log("ERR", $"OnAudioChunk: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -366,7 +314,6 @@ public partial class MainWindow : Window
         try
         {
             _capture.Stop();
-            _overlay?.SetProcessing();
             Log("⏳ Transcribing...");
 
             var audio = _capture.GetSnapshot();
@@ -400,9 +347,6 @@ public partial class MainWindow : Window
                         TextInjector.InjectText(cleaned, _recordingStartForegroundWindow);
                     }
                 }
-
-                _overlay?.SetDone();
-                await Task.Delay(900);
             }
             catch (Exception ex)
             {
@@ -418,7 +362,6 @@ public partial class MainWindow : Window
     private void ResetToIdleState()
     {
         _state = RecordingState.Idle;
-        _overlay?.SetIdle();
         _sessionTimer.Reset();
     }
 
@@ -427,10 +370,6 @@ public partial class MainWindow : Window
     private string SettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Taptalk", "settings.json");
-
-    private string OverlayPositionPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Taptalk", "overlay.json");
 
     private void SaveSettings()
     {
@@ -443,10 +382,8 @@ public partial class MainWindow : Window
                 ["lastModelDirectory"] = _lastModelDirectory,
                 ["lastModelPath"] = ModelPathBox?.Text ?? "",
                 ["engineIndex"] = EngineCombo?.SelectedIndex ?? 0,
-                ["autoStop"] = AutoStopChk?.IsChecked ?? true,
                 ["autoPaste"] = AutoPasteChk?.IsChecked ?? true,
                 ["debug"] = DebugChk?.IsChecked ?? true,
-                ["showOverlay"] = ShowOverlayChk?.IsChecked ?? true,
                 ["minimizeOnLaunch"] = MinimizeOnLaunchChk?.IsChecked ?? false,
                 ["startupWithWindows"] = StartupChk?.IsChecked ?? false,
                 ["hotkeyModifiers"] = GetSelectedHotkeyModifiers(),
@@ -487,20 +424,11 @@ public partial class MainWindow : Window
             if (root.TryGetProperty("engineIndex", out var e) && EngineCombo != null)
                 EngineCombo.SelectedIndex = Math.Max(0, Math.Min(e.GetInt32(), EngineCombo.Items.Count - 1));
 
-            if (root.TryGetProperty("autoStop", out var a) && AutoStopChk != null)
-                AutoStopChk.IsChecked = a.GetBoolean();
-
             if (root.TryGetProperty("autoPaste", out var ap) && AutoPasteChk != null)
                 AutoPasteChk.IsChecked = ap.GetBoolean();
 
             if (root.TryGetProperty("debug", out var dbg) && DebugChk != null)
                 DebugChk.IsChecked = dbg.GetBoolean();
-
-            if (root.TryGetProperty("showOverlay", out var so) && ShowOverlayChk != null)
-            {
-                _showOverlay = so.GetBoolean();
-                ShowOverlayChk.IsChecked = _showOverlay;
-            }
 
             if (root.TryGetProperty("minimizeOnLaunch", out var mol) && MinimizeOnLaunchChk != null)
                 MinimizeOnLaunchChk.IsChecked = mol.GetBoolean();
@@ -701,33 +629,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void AutoStopChk_Checked(object sender, RoutedEventArgs e)
-    {
-        _autoStop = AutoStopChk.IsChecked.GetValueOrDefault(true);
-        SaveSettings();
-    }
-
     private void AutoPasteChk_Checked(object sender, RoutedEventArgs e)
     {
         _autoPaste = AutoPasteChk.IsChecked.GetValueOrDefault(true);
-        SaveSettings();
-    }
-
-    private void ShowOverlayChk_Checked(object sender, RoutedEventArgs e)
-    {
-        _showOverlay = ShowOverlayChk.IsChecked.GetValueOrDefault(true);
-        if (_overlay != null)
-        {
-            if (_showOverlay)
-            {
-                _overlay.Show();
-                _overlay.SetIdle();
-            }
-            else
-            {
-                _overlay.Hide();
-            }
-        }
         SaveSettings();
     }
 
@@ -790,13 +694,10 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        SaveOverlayPosition();
-        _waveformTimer?.Stop();
         _hotKey?.Unregister();
         _tray?.Dispose();
         _capture.Dispose();
         _engine?.Dispose();
-        _overlay?.Close();
     }
 
     #endregion
@@ -877,51 +778,6 @@ public partial class MainWindow : Window
         if (!IsLoaded) return;
         ApplyHotkeyFromUi();
         SaveSettings();
-    }
-
-    #endregion
-
-    #region Overlay position persistence
-
-    private void SaveOverlayPosition()
-    {
-        if (_overlay == null) return;
-        try
-        {
-            var dir = Path.GetDirectoryName(OverlayPositionPath)!;
-            Directory.CreateDirectory(dir);
-            var pos = new Dictionary<string, double>
-            {
-                ["left"] = _overlay.Left,
-                ["top"] = _overlay.Top
-            };
-            File.WriteAllText(OverlayPositionPath, JsonSerializer.Serialize(pos));
-        }
-        catch (Exception ex)
-        {
-            DebugRecorder.Log("CFG", $"Save overlay position failed: {ex.Message}");
-        }
-    }
-
-    private void RestoreOverlayPosition()
-    {
-        if (_overlay == null) return;
-        try
-        {
-            if (!File.Exists(OverlayPositionPath)) return;
-            var json = File.ReadAllText(OverlayPositionPath);
-            var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("left", out var l) && root.TryGetProperty("top", out var t))
-            {
-                _overlay.Left = l.GetDouble();
-                _overlay.Top = t.GetDouble();
-            }
-        }
-        catch (Exception ex)
-        {
-            DebugRecorder.Log("CFG", $"Restore overlay position failed: {ex.Message}");
-        }
     }
 
     #endregion
