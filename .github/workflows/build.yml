@@ -31,10 +31,18 @@ jobs:
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build whisper.dll (AVX-512, static CRT)
+      - name: Install Vulkan SDK
+        run: |
+          $ver = '1.4.341.1'
+          curl.exe -f -o "$env:RUNNER_TEMP\VulkanSDK.exe" -L "https://sdk.lunarg.com/sdk/download/$ver/windows/vulkan-sdk.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\$ver"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\$ver\bin"
+
+      - name: Build whisper.dll (Vulkan GPU + AVX-512, static CRT)
         working-directory: native
         run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DGGML_OPENMP=OFF -DWHISPER_SRC_DIR="$env:GITHUB_WORKSPACE\whisper.cpp" -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_SERVER=OFF
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DGGML_OPENMP=OFF -DGGML_VULKAN=ON -DGGML_LTO=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_BF16=ON -DWHISPER_SRC_DIR="$env:GITHUB_WORKSPACE\whisper.cpp" -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_SERVER=OFF
           cmake --build build --target whisper
 
       - name: Restore + Build solution (Release x64)
@@ -48,6 +56,7 @@ jobs:
           Copy-Item "native\build\bin\ggml.dll" "publish\ggml.dll" -Force
           Copy-Item "native\build\bin\ggml-cpu.dll" "publish\ggml-cpu.dll" -Force
           Copy-Item "native\build\bin\ggml-base.dll" "publish\ggml-base.dll" -Force
+          Copy-Item "native\build\bin\ggml-vulkan.dll" "publish\ggml-vulkan.dll" -Force
 
       - name: Verify whisper.dll dependencies (dumpbin)
         run: |

@@ -32,6 +32,10 @@
       <Link>ggml-base.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\native\build\bin\ggml-vulkan.dll" Condition="Exists('..\native\build\bin\ggml-vulkan.dll')">
+      <Link>ggml-vulkan.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
